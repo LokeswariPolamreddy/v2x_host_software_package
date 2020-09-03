@@ -105,15 +105,15 @@ enum PKAlgorithm {
 	ECDSA_BRAINPOOLP256_WITH_SHA256 = 0xF0,
 	ECIES_BRAINPOOLP256 = 0xF1,
 	ECDSA_BRAINPOOLP384_WITH_SHA256 = 0xF2,
-	ECIES_BRAINPOOLP384 = 0xF3
+	ECIES_BRAINPOOLP384 = 0xF3,
+	SM2_DS = 0xC0, 				//SM2 Digital Signature
+	SM2_PKE = 0xC1 				//SM2 Public Key Encryption
 };
 
 typedef enum PKAlgorithm PKAlgorithm;
 
 typedef uint16_t WORD;		// WORD = unsigned 16 bit value
 typedef uint8_t BYTE;		// BYTE = unsigned 8 bit value
-
-
 
 typedef enum _LIFECYCLE_STATE
 {
@@ -444,6 +444,45 @@ extern int V2X_FirmwareVersion;
 		char *util_password,    // In: password used to decrypt the key file
 		BYTE *userkey,          // Out: key will be copied here
 		int  *userkeysize);     // Out: key size will be copied here
+
+	//-------------------------------------------------------------------------------
+	//	Create a SM2 compliant ECC digital signature
+	//-------------------------------------------------------------------------------
+	V2X_RESULT V2X_sm2_sign (
+				int userID, 		    	// In: Admin/User ID
+			        PKAlgorithm alg, 	    	// In: Algorithm/curve: SM2_DS
+			        uint32_t index, 	    	// In: private key index to use (1...3000)
+			        uint8_t const *dgst, 		// In: The digest to sign
+			        size_t dgstLen, 	    	// In: The length of the dgst buffer (for SM3 fixed to 32B)
+			        uint8_t *sig, 			// Out: Returns the signature encoded as a byte array
+			        size_t *sigLen);		// Out: Returns the number of bytes in sig
+
+	//-------------------------------------------------------------------------------
+	//	Do a SM2 compliant ECC encryption
+	//-------------------------------------------------------------------------------
+	V2X_RESULT V2X_sm2_encrypt (
+				int userID , 			// In: Admin/User ID
+				PKAlgorithm alg, 		// In: Algorithm/curve: SM2_PKE
+				ECPublicKey *pubkey, 		// In: Recipient public key
+				uint8_t const *plaindata, 	// In: The plain text data to encrypt (16B)
+				size_t plainLen, 		// In: The length of the plain text data
+				uint8_t *C1, 			//Out: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				uint8_t *C2, 			//Out: Part 2 of the ciphertext (ciphered message). Size <plainLen>
+				uint8_t *C3); 			//Out: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+
+	//-------------------------------------------------------------------------------
+	//	Perform a SM2 decryption according to draft-shen-sm2-ecdsa-02 - SM2 Decryption Algorithm
+	//-------------------------------------------------------------------------------
+	V2X_RESULT V2X_sm2_decrypt (
+				int userID, 	    		// In: Admin/User ID
+			        PKAlgorithm alg, 	    	// In: Algorithm/curve: SM2_PKE
+			        uint32_t index, 	    	// In: private key index to use (1...3000)
+				uint8_t *plaindata, 		// Out: The plain text data 
+				size_t msgLen, 			// In: The length of the message = length of C2
+				uint8_t *C1, 			// In: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				uint8_t *C2, 			// In: Part 2 of the ciphertext (ciphered message). Size <msgLen>
+				uint8_t *C3);			// In: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+
 
 #endif
 

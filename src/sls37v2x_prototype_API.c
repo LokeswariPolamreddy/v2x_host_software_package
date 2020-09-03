@@ -198,9 +198,32 @@ BYTE ConvertAlgID(BYTE alg)
         case ECIES_NISTP384                 : return 2;
         case ECDSA_BRAINPOOLP384_WITH_SHA256: return 3;
         case ECIES_BRAINPOOLP384            : return 3;
+	case SM2_DS			    : return 6;
+	case SM2_PKE			    : return 6;
     }
 	return 0;
 }
+//-----------------------------------------------------------------------------
+BOOL CheckAlgID(BYTE alg)
+{
+    switch (alg) {
+        case ECDSA_NISTP256_WITH_SHA256     :
+        case ECIES_NISTP256                 :
+        case ECDSA_BRAINPOOLP256_WITH_SHA256:
+        case ECIES_BRAINPOOLP256            :
+        case ECDSA_NISTP384_WITH_SHA256     :
+        case ECIES_NISTP384                 :
+        case ECDSA_BRAINPOOLP384_WITH_SHA256:
+        case ECIES_BRAINPOOLP384            :
+	case SM2_DS			    :
+	case SM2_PKE			    :
+ 		 return 1;
+	default:
+		return 0;
+    }
+	return 0;
+}
+
 //-----------------------------------------------------------------------------
 void ShortOrExtendedLength(const BYTE *data, int datasize)
 {
@@ -667,7 +690,7 @@ V2X_RESULT V2X_DeletePrivateKey(
 //-----------------------------------------------------------------------------
 V2X_RESULT V2X_keygen(
                int          userid, // In: Admin/User ID
-               PKAlgorithm  alg,	// In:  Algorithm/curve: ECC224/256/384 NIST/BP
+               PKAlgorithm  alg,	// In:  Algorithm/curve: ECC224/256/384 NIST/BP/SM2
                uint32_t     index,	// In:  index to use when storing generated private key (1...3000)
                ECPublicKey *pubkey) // Out: generated public key is copied to this pointer/address
 {
@@ -700,7 +723,7 @@ V2X_RESULT V2X_keygen(
 //-----------------------------------------------------------------------------
 V2X_RESULT V2X_import_public_key(
                         int userid,             // In: Admin/User ID
-                        PKAlgorithm  alg,	    // In: Algorithm/curve: ECC224/256/384 NIST/BP
+                        PKAlgorithm  alg,	    // In: Algorithm/curve: ECC224/256/384 NIST/BP SM2
                         uint32_t    index,	    // In: index to use when storing private key (1...3000)
                         ECPublicKey *pubkey)    // In: public key
 {
@@ -735,7 +758,7 @@ V2X_RESULT V2X_import_public_key(
 //------------------------------------------------------------------------------------
 V2X_RESULT V2X_import_private_key(
                         int userid,             // In: Admin/User ID
-                        PKAlgorithm  alg,	    // In: Algorithm/curve: ECC224/256/384 NIST/BP
+                        PKAlgorithm  alg,	    // In: Algorithm/curve: ECC224/256/384 NIST/BP SM2
                         uint32_t      index,	// In: index to use when storing private key (1...3000)
                         ECPrivateKey *prvkey)	// In: private key
 {
@@ -803,7 +826,7 @@ V2X_RESULT V2X_export_public_key(
 //------------------------------------------------------------------------------------
 V2X_RESULT V2X_export_private_key(
                         int          userid,    // In: Admin/User ID
-                        uint32_t     index,	    // In: index to use when storing private key (1...3000)
+                        uint32_t     index,	// In: index to use when storing private key (1...3000)
                         ECPrivateKey *prvkey)	// Out: buffer for private key
 {
     int ret;
@@ -2000,6 +2023,7 @@ volatile BYTE encrkey[AES256_KEY_SIZE];
           outsize = filesize + 32,
           ret = 0;
 
+    //HexDump("Hexkeyfile_Pwkeyfile_Debug:  ", filedata, filesize);
     if (!DeriveKeyFromPassword(password, passwordlen, AES256_KEY_SIZE, (BYTE*)encrkey)) return 0;
 
     SAFE_MALLOC(indata, insize);
@@ -2096,3 +2120,129 @@ int V2X_LoadUserKey(BYTE *keyid,            // In: pointer to KeyID (4 bytes)
     }
     return 1;
 }
+
+//-------------------------------------------------------------------------------
+//	Perform a SM2 signature according to draft-shen-sm2-ecdsa-02 - SM2 Digital Signature Algorithm
+//-------------------------------------------------------------------------------
+V2X_RESULT V2X_sm2_sign (int userID, 		    	// In: Admin/User ID
+			 PKAlgorithm alg, 	    	// In: Algorithm/curve: SM2_DS
+			 uint32_t index, 	    	// In: private key index to use (1...3000)
+			 uint8_t const *dgst, 		// In: The digest to sign
+			 size_t dgstLen, 	    	// In: The length of the dgst buffer (for SM3 fixed to 32B)
+			 uint8_t *sig, 		    	// Out: Returns the signature encoded as a byte array
+			 size_t *sigLen) 	    	// Out: Returns the number of bytes in sig
+{
+   int ret;
+    if ((int)dgstLen > DIGEST_SIZE) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_sm2_sign: Digest too big: dgstLen=%d\n", dgstLen);
+#endif
+        errorflag=1;
+        return 0;
+    }
+
+    BUILD_APDU_ALGID(0xE1)
+    BUILD_APDU_INDEX(index)
+    ShortOrExtendedLength(dgst, dgstLen);
+
+    Log_Timing = 1;
+    ret = V2X_send_apdu(userID, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 200);
+    Log_Timing = 0;
+
+    if (!CheckResponse(ret, "V2X_sm2_sign", index)) ret = 0;
+    else {
+        if (sig) memcpy(sig, RESP_APDU, RESP_APDU_size);
+        if (sigLen) *sigLen = RESP_APDU_size;
+    }
+
+    return ret;
+}
+
+//-------------------------------------------------------------------------------
+//	Perform a SM2 encryption according to draft-shen-sm2-ecdsa-02 - SM2 Encryption Algorithm
+//-------------------------------------------------------------------------------
+V2X_RESULT V2X_sm2_encrypt	   (int userID, 	    	// In: Admin/User ID
+			            PKAlgorithm alg, 	    	// In: Algorithm/curve: SM2_PKE
+				    ECPublicKey *pubkey, 	// In: Recipient public key
+				    uint8_t const *plaindata, 	// In: The plain text data to encrypt (16B, 24B or 32B)
+				    size_t plainLen, 		// In: The length of the plain text data
+				    uint8_t *C1, 		// Out: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				    uint8_t *C2, 		// Out: Part 2 of the ciphertext (ciphered message). Size <plainLen>
+				    uint8_t *C3) 		// Out: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+{
+   int ret;
+
+   if ((int)plainLen> DIGEST_SIZE) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_sm2_encrypt: message too big: plainLen=%d\n", plainLen);
+#endif
+        errorflag=1;
+        return 0;
+    }
+
+    BUILD_APDU_ALGID(0xE8)
+
+    APDUsize = 5; // Only short Lc supported here!
+    BUILD_APDU_ADD_TAG(0x83, pubkey->blob, pubkey->len)
+    BUILD_APDU_ADD_TAG(0x85, plaindata, plainLen)
+    APDUbuffer[4] = (BYTE)APDUsize - 5;
+    APDUbuffer[APDUsize++] = 0x00; // Le
+
+    Log_Timing = 1;
+    ret = V2X_send_apdu(userID, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 200);
+    Log_Timing = 0;
+
+    if (!CheckResponseNoData(ret, "V2X_sm2_encrypt", 0)) ret = 0;
+    else {
+        if (C1) memcpy(C1, RESP_APDU,  65);
+        if (C2) memcpy(C2, RESP_APDU + 65, plainLen);
+	if (C3) memcpy(C3, RESP_APDU + 65 + plainLen, 32);
+    }
+
+    return ret;
+}
+
+//-------------------------------------------------------------------------------
+//	Perform a SM2 decryption according to draft-shen-sm2-ecdsa-02 - SM2 Encryption Algorithm
+//-------------------------------------------------------------------------------
+V2X_RESULT V2X_sm2_decrypt	   (int userID, 	    	// In: Admin/User ID
+			            PKAlgorithm alg, 	    	// In: Algorithm/curve: SM2_PKE
+				    uint32_t index, 	    	// In: private key index to use (1...3000)
+				    uint8_t *plaindata, 	// Out: The plain text data to encrypt (16B, 24B or 32B)
+				    size_t msgLen, 		// In: The length of the message = length of C2
+				    uint8_t *C1, 		// In: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				    uint8_t *C2, 		// In: Part 2 of the ciphertext (ciphered message). Size <plainLen>
+				    uint8_t *C3) 		// In: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+{
+   int ret;
+
+   if ((int)msgLen> DIGEST_SIZE) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_sm2_encrypt: message too big: msgLen=%d\n", msgLen);
+#endif
+        errorflag=1;
+        return 0;
+    }
+
+    APDUsize = 5 + 65 + msgLen + 32; 
+
+    BUILD_APDU_ALGID(0xE9)
+    BUILD_APDU_INDEX(index)
+    APDUbuffer[4] = 65 + msgLen + 32; 
+
+    memcpy(&(APDUbuffer[5]), C1, 65);
+    memcpy(&(APDUbuffer[5+65]), C2, msgLen);
+    memcpy(&(APDUbuffer[5+65+msgLen]), C3, 32);
+
+    Log_Timing = 1;
+    ret = V2X_send_apdu(userID, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 200);
+    Log_Timing = 0;
+
+    if (!CheckResponseNoData(ret, "V2X_sm2_decrypt", 0)) ret = 0;
+    else {
+       memcpy(plaindata, RESP_APDU,  msgLen);
+    }
+
+    return ret;
+}
+

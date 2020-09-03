@@ -34,10 +34,15 @@
 /*******************************
 *    Defines/Macros            *
 *******************************/
-#define VERSION "1.0"
+#define VERSION "1.3"
 #define NVM_PAGE_SIZE 256
 #define NVM_UPLOAD_BLOCK_SIZE 1536
 #define ESC_KEY 27
+
+//alternatives for break, continue and return 0 in the if statements
+#define BREAK_REP -1
+#define CONTINUE_REP 2
+#define RETURN_0_REP 1
 
 // Public/Private/secret key slots used in testing
 #define KeyID_HMAC      MAX_NVM_KEYS - 1                // Key slot 2999
@@ -95,7 +100,7 @@ int MessageSize;
 BYTE DigestData[DIGEST_SIZE+1];
 int DigestSize;
 BYTE DigestTest[DIGEST_SIZE+1];
-BYTE TestData[512];
+BYTE TestData[MAX_DATA_SIZE];	//BYTE TestData[512];
 int TestSize;
 
 BYTE BYTE_TestHMAC_key[512];
@@ -129,15 +134,44 @@ int trans_num, errors_num;
 uint64_t Test_Time_Min, Test_Time_Max, Test_Time;
 int i, ret;
 
+int iScanned;
+
+extern volatile int FlagSessionActive;
 
 /*******************************
 *    Function Declarations     *
 *******************************/
 
 BYTE ConvertAlgID(BYTE alg);
+BOOL CheckAlgID(BYTE alg);
 
+int Program_HSW_Firmware(char *binfilename);
 
+void Command_Help();
+int Command_Open(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Close(int iScanned);
+void Command_TestSPI(int iScanned);
+int Command_Info(int iScanned);
+int Command_Genkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+void Command_Delkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Reset(int iScanned);
+int Command_Printnvm(int iScanned);
 
+int Command_Prepecdsa(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE], char CCommandBuffer[256]);
+int Command_TestAES();
+int Command_Randkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+// Command_Init();
+int Command_Pwkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Hexkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+
+int Command_Sendcmd(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Sendcmd2(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Setac(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+
+int Command_Writefile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Readfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+int Command_Importkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
+void Command_UpdateFW(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
 
 
 #endif

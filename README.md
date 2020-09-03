@@ -26,7 +26,7 @@ The Infineon SLS37 V2X Prototype is a prototype of an SPI hardware security modu
 
 ## Overview
 
-<img width="800" src="https://raw.githubusercontent.com/Infineon/v2x_host_software_package/master/overview.png">
+<img width="800" src="https://github.com/Infineon/v2x_host_software_package/raw/master/overview.png">
 
 The V2X Host Software Package consists of the following building blocks:
 
@@ -49,7 +49,7 @@ The V2X Host Software Package consists of the following building blocks:
 Detailed documentation can be found in the SLS37 V2X Prototype Databook, which is part of the Infineon SLS37 V2X Prototype Solution. Please [email us](mailto:dsscustomerservice@infineon.com) to get the required hardware and documentation.
 
 ## Porting Guide
-The Infineon V2X Host Software Package is meant to be run a Raspberry Pi Model 3 with Raspbian OS or any similar Linux system with access to the SPI interface via a device file (e.g. /dev/spidev0.0). The code has been tested with Raspbian GNU/Linux 9 (stretch) Kernel version 4.14.
+The Infineon V2X Host Software Package is meant to be run on a Raspberry Pi Model 3 with Raspbian OS or any similar Linux system with access to the SPI interface via a device file (e.g. /dev/spidev0.0). The code has been tested with Raspbian GNU/Linux 10 (buster) Kernel version 4.19.
 
 
 ## Contributing

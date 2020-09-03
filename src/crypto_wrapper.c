@@ -41,6 +41,9 @@ static char *ECC_Curve_Name[MAX_CURVES] = {
 	"brainpoolP256r1",
 	"secp384r1",
 	"brainpoolP384r1",
+	"",
+	"",
+	"sm2"
 };
 
 static EVP_CIPHER_CTX *ctx;
@@ -492,6 +495,648 @@ Verify_ECDSA_exit:
     if (pubkey) EC_KEY_free(pubkey);
     return ret;
 }
+
+int sm2_sig_verify(const EC_KEY *key, const ECDSA_SIG *sig, const BIGNUM *e);
+//--------------------------------------------------------------------
+// Verify SM2 signature
+// Returns: 1 - SM2 signature verified OK,   other - error
+//--------------------------------------------------------------------
+int Crypto_SM2_Verify(BYTE *pubKeyBytes,
+                         int      publen,
+                         BYTE    *digest,
+                         int      digestlen,
+                         BYTE    *signature,
+                         int      signlen)
+{
+    int ret = 0;
+    BYTE *psign = signature;
+    ECDSA_SIG *sig;
+    EC_KEY *pubkey;
+    EC_GROUP *EccGroupSM2 = EC_GROUP_new_by_curve_name(NID_sm2);    
+
+    BIGNUM *BigNumPubKey = BN_new();
+    BN_bin2bn(pubKeyBytes, publen, BigNumPubKey);
+    
+    BIGNUM *hash = BN_new();
+    BN_bin2bn(digest, digestlen, hash);
+
+    pubkey = EC_KEY_new_by_curve_name(NID_sm2);
+    if (pubkey == NULL) { LogError("ERROR: EC_KEY_new_by_curve_name: %s\n", ERR_error_string(ERR_get_error(), NULL));
+                          goto Verify_SM2_exit; }
+    
+    EC_KEY_set_public_key(pubkey, EC_POINT_bn2point(EccGroupSM2, BigNumPubKey, NULL, NULL));
+
+    if (!EC_KEY_check_key(pubkey)) {
+        LogError("EC_KEY_check_key: Invalid Public Key. Curve: %s\n", CurveName);
+        LogError("%s\n", ERR_error_string(ERR_get_error(), NULL));
+        goto Verify_SM2_exit;
+    } 
+    sig = d2i_ECDSA_SIG(NULL, (const BYTE **)&psign, signlen);
+    if (sig == NULL) { LogError("d2i_SM2_SIG: Invalid Signature format\n"); goto Verify_SM2_exit; }
+
+    ret = sm2_sig_verify(pubkey, sig, hash);
+
+Verify_SM2_exit:
+    if (BigNumPubKey )  BN_free(BigNumPubKey );
+    if (pubkey) EC_KEY_free(pubkey);
+    return ret;
+}
+
+int sm2_sig_verify(const EC_KEY *key, const ECDSA_SIG *sig, const BIGNUM *e)
+{
+    int ret = 0;
+    const EC_GROUP *group = EC_KEY_get0_group(key);
+    const BIGNUM *order = EC_GROUP_get0_order(group);
+    BN_CTX *ctx = NULL;
+    EC_POINT *pt = NULL;
+    BIGNUM *t = NULL;
+    BIGNUM *x1 = NULL;
+    const BIGNUM *r = NULL;
+    const BIGNUM *s = NULL;
+    
+    ctx = BN_CTX_new();
+    pt = EC_POINT_new(group);
+    if (ctx == NULL || pt == NULL) {
+	LogError("sm2_sig_verify: malloc error\n");
+        goto done;
+    }
+
+    BN_CTX_start(ctx);
+    t = BN_CTX_get(ctx);
+    x1 = BN_CTX_get(ctx);
+    if (x1 == NULL) {
+	LogError("sm2_sig_verify: malloc x1 error\n");
+        goto done;
+    }
+
+    /*
+     * B1: verify whether r' in [1,n-1], verification failed if not
+     * B2: verify whether s' in [1,n-1], verification failed if not
+     * B3: set M'~=ZA || M'
+     * B4: calculate e'=Hv(M'~)
+     * B5: calculate t = (r' + s') modn, verification failed if t=0
+     * B6: calculate the point (x1', y1')=[s']G + [t]PA
+     * B7: calculate R=(e'+x1') modn, verification pass if yes, otherwise failed
+     */
+
+    ECDSA_SIG_get0(sig, &r, &s);
+
+    if (BN_cmp(r, BN_value_one()) < 0
+            || BN_cmp(s, BN_value_one()) < 0
+            || BN_cmp(order, r) <= 0
+            || BN_cmp(order, s) <= 0) {
+        LogError("Bad signature!\n");
+        goto done;
+    }
+
+	// B5:
+    if (!BN_mod_add(t, r, s, order, ctx)) {
+        LogError("sm2_sig_verify: BN_mod_add error\n");
+        goto done;
+    }
+
+    if (BN_is_zero(t)) {
+        LogError("Bad signature!\n");
+        goto done;
+    }
+	// B6
+    if (!EC_POINT_mul(group, pt, s, EC_KEY_get0_public_key(key), t, ctx)
+            || !EC_POINT_get_affine_coordinates(group, pt, x1, NULL, ctx)) {
+                
+        LogError("sm2_sig_verify: POINT_mul error\n");
+
+        goto done;
+    }
+	// B7
+    if (!BN_mod_add(t, e, x1, order, ctx)) {
+        LogError("sm2_sig_verify: BN_mod_add error\n");
+        goto done;
+    }
+	
+    if (BN_cmp(r, t) == 0) {
+//	LogError("SM2_VERIFY_SIG: VALID Signature!\n");
+        ret = 1;
+	}
+    else
+//	LogError("SM2_VERIFY_SIG: Invalid Signature!\n");
+ done:
+    EC_POINT_free(pt);
+    BN_CTX_free(ctx);
+    return ret;
+}
+
+//--------------------------------------------------------------------
+// Decrypt SM2 encryption
+// Returns: 1 - and plaintext, other - error
+//--------------------------------------------------------------------
+int Crypto_SM2_Decrypt  (BYTE *pri_key,
+                         BYTE    *c1,
+                         BYTE    *c3,
+                         BYTE    *c2,
+                         int      c2_len,
+			 BYTE	 *plaintext)
+{
+	int error_code;
+	unsigned char c1_x[32], c1_y[32], x2[32], y2[32];
+	unsigned char x2_y2[64], digest[32];
+	unsigned char *t = NULL, *M = NULL;
+	BN_CTX *ctx = NULL;
+	BIGNUM *bn_d = NULL, *bn_c1_x = NULL, *bn_c1_y = NULL;
+	BIGNUM *bn_x2 = NULL, *bn_y2 = NULL;
+	const BIGNUM *bn_cofactor;
+	EC_GROUP *group = NULL;
+	EC_POINT *c1_pt = NULL, *s_pt = NULL, *ec_pt = NULL;
+	const EVP_MD *md;
+	EVP_MD_CTX *md_ctx = NULL;
+	int message_len, i, flag;
+
+	message_len = c2_len;
+	memcpy(c1_x, (c1 + 1), sizeof(c1_x));
+	memcpy(c1_y, (c1 + 1 + sizeof(c1_x)), sizeof(c1_y));
+
+	if ( !(ctx = BN_CTX_new()) )
+	{
+	   LogError("sm2_decrypt: BN_CTX_new error\n");
+	   goto clean_up;
+	}
+	BN_CTX_start(ctx);
+	bn_d = BN_CTX_get(ctx);
+	bn_c1_x = BN_CTX_get(ctx);
+	bn_c1_y = BN_CTX_get(ctx);
+	bn_x2 = BN_CTX_get(ctx);
+	bn_y2 = BN_CTX_get(ctx);
+	if ( !(bn_y2) )
+	{
+		goto clean_up;
+	}
+	if ( !(group = EC_GROUP_new_by_curve_name(NID_sm2)) )
+	{
+ 		LogError("sm2_decrypt: EC_GROUP_new_by_curve_name error\n");
+		goto clean_up;
+	}
+	
+	if ( !(c1_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(s_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(ec_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+
+	if ( !(md_ctx = EVP_MD_CTX_new()) )
+	{
+		goto clean_up;
+	}
+
+	if ( !(BN_bin2bn(pri_key, 32, bn_d)) )
+	{
+		goto clean_up;
+	}
+	if ( !(BN_bin2bn(c1_x, sizeof(c1_x), bn_c1_x)) )
+	{
+		goto clean_up;
+	}
+	if ( !(BN_bin2bn(c1_y, sizeof(c1_y), bn_c1_y)) )
+	{
+		goto clean_up;
+	}
+
+	if ( !(EC_POINT_set_affine_coordinates_GFp(group,
+	                                           c1_pt,
+						   bn_c1_x,
+						   bn_c1_y,
+						   ctx)) )
+	{
+		LogError("sm2_decrypt: EC_POINT_set_affine_coordinates_GFp error\n");
+		goto clean_up;
+	}
+
+	if ( EC_POINT_is_on_curve(group, c1_pt, ctx) != 1 )
+	{
+		LogError("sm2_decrypt: EC_POINT_is_on_curve error\n");
+		goto clean_up;
+	}
+
+	if ( !(bn_cofactor = EC_GROUP_get0_cofactor(group)) )
+	{
+		LogError("sm2_decrypt: EC_GROUP_get0_cofactor error\n");
+		goto clean_up;
+	}
+	if ( !(EC_POINT_mul(group, s_pt, NULL, c1_pt, bn_cofactor, ctx)) )
+	{
+		LogError("sm2_decrypt: EC_POINT_mul error\n");
+		goto clean_up;
+	}
+	if ( EC_POINT_is_at_infinity(group, s_pt) )
+	{
+		LogError("sm2_decrypt: INVALID_SM2_CIPHERTEXT error\n");
+		goto clean_up;
+	}
+
+	if ( !(EC_POINT_mul(group, ec_pt, NULL, c1_pt, bn_d, ctx)) )
+	{
+		LogError("sm2_decrypt: EC_POINT_mul error\n");
+		goto clean_up;
+	}
+	if ( !(EC_POINT_get_affine_coordinates_GFp(group,
+	                                           ec_pt,
+						   bn_x2,
+						   bn_y2,
+						   ctx)) )
+	{
+		LogError("sm2_decrypt: EC_POINT_get_affine_coordinates_GFp error\n");
+		goto clean_up;
+	}
+	if ( BN_bn2binpad(bn_x2,
+		          x2,
+			  sizeof(x2)) != sizeof(x2) )
+	{
+		LogError("sm2_decrypt: BN_bn2binpad x error\n");
+		goto clean_up;
+	}
+	if ( BN_bn2binpad(bn_y2,
+		          y2,
+			  sizeof(x2)) != sizeof(y2) )
+	{
+		LogError("sm2_decrypt: BN_bn2binpad y error\n");
+		goto clean_up;
+	}
+
+	memcpy(x2_y2, x2, sizeof(x2));
+	memcpy((x2_y2 + sizeof(x2)), y2, sizeof(y2));
+	md = EVP_sm3();
+	
+	if ( !(t = (unsigned char *)malloc(message_len)) )
+	{
+		LogError("sm2_decrypt: malloc error\n");
+		goto clean_up;
+	}
+	if ( !(ECDH_KDF_X9_62(t,
+	                      message_len,
+			      x2_y2,
+			      sizeof(x2_y2),
+			      NULL,
+			      0,
+			      md)) )
+	{
+		LogError("sm2_decrypt: COMPUTE_SM2_KDF_FAIL error\n");
+		goto clean_up;
+	}
+
+	/* If each component of t is zero, the function 
+	   returns and reports an error. */
+	flag = 1;
+	for (i = 0; i < message_len; i++)
+	{
+		if ( t[i] != 0 )
+		{
+			flag = 0;
+			break;
+		}
+	}
+	if (flag)
+	{
+		LogError("sm2_decrypt: INVALID_SM2_CIPHERTEXT error\n");
+		goto clean_up;
+	}	
+	if ( !(M = (unsigned char *)malloc(message_len)) )
+	{
+		LogError("sm2_decrypt: malloc error\n");
+		goto clean_up;
+	}
+	for (i = 0; i < message_len; i++)
+	{
+		M[i] = c2[i] ^ t[i];
+	}
+
+	EVP_DigestInit_ex(md_ctx, md, NULL);
+	EVP_DigestUpdate(md_ctx, x2, sizeof(x2));
+        EVP_DigestUpdate(md_ctx, M, message_len);
+	EVP_DigestUpdate(md_ctx, y2, sizeof(y2));
+        EVP_DigestFinal_ex(md_ctx, digest, NULL);
+
+	if ( memcmp(digest, c3, sizeof(digest)) )
+	{
+		LogError("sm2_decrypt: INVALID_SM2_CIPHERTEXT error\n");
+		goto clean_up;
+	}
+	memcpy(plaintext, M, message_len);
+
+	// will be return value
+	error_code = 1;
+
+clean_up:
+        if (ctx)
+	{
+		BN_CTX_end(ctx);
+		BN_CTX_free(ctx);
+	}
+	if (group)
+	{
+		EC_GROUP_free(group);
+	}
+
+	if (c1_pt)
+	{
+		EC_POINT_free(c1_pt);
+	}
+	if (s_pt)
+	{
+		EC_POINT_free(s_pt);
+	}
+	if (ec_pt)
+	{
+		EC_POINT_free(ec_pt);
+	}	
+	if (md_ctx)
+	{
+		EVP_MD_CTX_free(md_ctx);
+	}	
+	if (t)
+	{
+		free(t);
+	}
+	if (M)
+	{
+		free(M);
+	}
+
+	return error_code;
+}
+
+//--------------------------------------------------------------------
+// Encrypt SM2 encryption
+// Returns: 1 - and c1, c2, c3, other - error
+//--------------------------------------------------------------------
+int Crypto_SM2_Encrypt  (BYTE    *pub_key,
+                         BYTE    *c1,
+                         BYTE    *c2,
+                         BYTE    *c3,
+                         int      message_len,
+			 BYTE	 *message)
+{
+	int error_code;
+	unsigned char pub_key_x[32], pub_key_y[32], c1_x[32], c1_y[32], x2[32], y2[32];
+	unsigned char c1_point[65], x2_y2[64];
+	unsigned char *t = NULL;
+	BN_CTX *ctx = NULL;
+	BIGNUM *bn_k = NULL, *bn_c1_x = NULL, *bn_c1_y = NULL;
+	BIGNUM *bn_pub_key_x = NULL, *bn_pub_key_y = NULL;
+	BIGNUM *bn_x2 = NULL, *bn_y2 = NULL;
+	const BIGNUM *bn_order, *bn_cofactor;
+	EC_GROUP *group = NULL;
+	const EC_POINT *generator;
+	EC_POINT *pub_key_pt = NULL, *c1_pt = NULL, *s_pt = NULL, *ec_pt = NULL;
+	const EVP_MD *md;
+	EVP_MD_CTX *md_ctx = NULL;
+	int i, flag;
+
+	memcpy(pub_key_x, (pub_key + 1), sizeof(pub_key_x));
+	memcpy(pub_key_y, (pub_key + 1 + sizeof(pub_key_x)), sizeof(pub_key_y));
+
+	error_code = 0xFFFF;
+	if ( !(t = (unsigned char *)malloc(message_len)) )
+	{
+		goto clean_up;
+	}
+	if ( !(ctx = BN_CTX_new()) )
+	{
+	        goto clean_up;
+	}
+	BN_CTX_start(ctx);
+	bn_k = BN_CTX_get(ctx);
+	bn_c1_x = BN_CTX_get(ctx);
+	bn_c1_y = BN_CTX_get(ctx);
+	bn_pub_key_x = BN_CTX_get(ctx);
+	bn_pub_key_y = BN_CTX_get(ctx);
+	bn_x2 = BN_CTX_get(ctx);	
+	bn_y2 = BN_CTX_get(ctx);
+	if ( !(bn_y2) )
+	{
+		goto clean_up;
+	}
+	if ( !(group = EC_GROUP_new_by_curve_name(NID_sm2)) )
+	{
+		goto clean_up;
+	}
+	
+	if ( !(pub_key_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(c1_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(s_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(ec_pt = EC_POINT_new(group)) )
+	{
+		goto clean_up;
+	}
+	
+	if ( !(md_ctx = EVP_MD_CTX_new()) )
+	{
+		goto clean_up;
+	}	
+
+	error_code = 0xFFFE;
+	if ( !(BN_bin2bn(pub_key_x, sizeof(pub_key_x), bn_pub_key_x)) )
+	{
+		goto clean_up;
+	}
+	if ( !(BN_bin2bn(pub_key_y, sizeof(pub_key_y), bn_pub_key_y)) )
+	{
+		goto clean_up;
+	}
+
+	if ( !(bn_order = EC_GROUP_get0_order(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(bn_cofactor = EC_GROUP_get0_cofactor(group)) )
+	{
+		goto clean_up;
+	}
+	if ( !(generator = EC_GROUP_get0_generator(group)) )
+	{
+		goto clean_up;
+	}
+
+	if ( !(EC_POINT_set_affine_coordinates_GFp(group,
+	                                           pub_key_pt,
+						   bn_pub_key_x,
+						   bn_pub_key_y,
+						   ctx)) )
+	{
+		goto clean_up;
+	}
+
+	/* Compute EC point s = [h]Pubkey, h is the cofactor.
+	   If s is at infinity, the function returns and reports an error. */
+	if ( !(EC_POINT_mul(group, s_pt, NULL, pub_key_pt, bn_cofactor, ctx)) )
+	{
+		goto clean_up;
+	}
+	if ( EC_POINT_is_at_infinity(group, s_pt) )
+	{
+		LogError("sm2_encrypt: EC_POINT_IS_AT_INFINITY error\n");
+		goto clean_up;
+	}
+	md = EVP_sm3();
+
+	do
+	{
+		if ( !(BN_rand_range(bn_k, bn_order)) )
+		{
+			goto clean_up;
+		}
+		if ( BN_is_zero(bn_k) )
+		{
+			continue;
+		}
+		if ( !(EC_POINT_mul(group, c1_pt, bn_k, NULL, NULL, ctx)) )
+		{
+			goto clean_up;
+		}
+		if ( !(EC_POINT_mul(group, ec_pt, NULL, pub_key_pt, bn_k, ctx)) )
+		{
+			goto clean_up;
+		}
+		if ( !(EC_POINT_get_affine_coordinates_GFp(group,
+		                                           ec_pt,
+							   bn_x2,
+							   bn_y2,
+							   ctx)) )
+		{
+			goto clean_up;
+		}
+		if ( BN_bn2binpad(bn_x2,
+		                  x2,
+				  sizeof(x2)) != sizeof(x2) )
+		{
+			goto clean_up;
+		}
+		if ( BN_bn2binpad(bn_y2,
+		                  y2,
+				  sizeof(y2)) != sizeof(y2) )
+		{
+			goto clean_up;
+		}
+		memcpy(x2_y2, x2, sizeof(x2));
+		memcpy((x2_y2 + sizeof(x2)), y2, sizeof(y2));
+		
+		if ( !(ECDH_KDF_X9_62(t,
+		                      message_len,
+				      x2_y2,
+				      sizeof(x2_y2),
+				      NULL,
+				      0,
+				      md)) )
+		{
+			LogError("sm2_encrypt: COMPUTE_SM2_KDF_FAIL error\n");
+			goto clean_up;
+		}
+
+		/* If each component of t is zero, the random number k 
+		   should be re-generated. */
+		flag = 1;
+		for (i = 0; i < message_len; i++)
+		{
+			if ( t[i] != 0 )
+			{
+				flag = 0;
+				break;
+			}
+		}		
+	} while (flag);
+	
+	if ( !(EC_POINT_get_affine_coordinates_GFp(group,
+	                                           c1_pt,
+						   bn_c1_x,
+						   bn_c1_y,
+						   ctx)) )
+	{
+		goto clean_up;
+	}
+
+	if ( BN_bn2binpad(bn_c1_x,
+	                  c1_x,
+			  sizeof(c1_x)) != sizeof(c1_x) )
+	{
+		goto clean_up;
+	}
+	if ( BN_bn2binpad(bn_c1_y,
+	                  c1_y,
+			  sizeof(c1_y)) != sizeof(c1_y) )
+	{
+		goto clean_up;
+	}
+	c1_point[0] = 0x4;
+	memcpy((c1_point + 1), c1_x, sizeof(c1_x));
+	memcpy((c1_point + 1 + sizeof(c1_x)), c1_y, sizeof(c1_y));
+	memcpy(c1, c1_point, sizeof(c1_point));
+	
+	EVP_DigestInit_ex(md_ctx, md, NULL);
+	EVP_DigestUpdate(md_ctx, x2, sizeof(x2));
+        EVP_DigestUpdate(md_ctx, message, message_len);
+	EVP_DigestUpdate(md_ctx, y2, sizeof(y2));
+        EVP_DigestFinal_ex(md_ctx, c3, NULL);
+	
+	for (i = 0; i < message_len; i++)
+	{
+		c2[i] = message[i] ^ t[i];
+	}
+
+	// will be return value
+	error_code = 1;
+	
+clean_up:
+        if (t)
+	{
+		free(t);
+	}
+        if (ctx)
+	{
+		BN_CTX_end(ctx);
+		BN_CTX_free(ctx);
+	}
+	if (group)
+	{
+		EC_GROUP_free(group);
+	}
+
+	if (pub_key_pt)
+	{
+		EC_POINT_free(pub_key_pt);
+	}
+	if (c1_pt)
+	{
+		EC_POINT_free(c1_pt);
+	}
+	if (s_pt)
+	{
+		EC_POINT_free(s_pt);
+	}
+	if (ec_pt)
+	{
+		EC_POINT_free(ec_pt);
+	}
+	if (md_ctx)
+	{
+		EVP_MD_CTX_free(md_ctx);
+	}
+
+	return error_code;
+}
+
 //--------------------------------------------------------------------
 // Generate ECDH shared secret                     OpenSSL version.
 // Note that [FIPS186-3] refers to secp224r1 as P-224,

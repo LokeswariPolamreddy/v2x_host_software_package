@@ -30,7 +30,7 @@
 #include "testvectors_sha.c" // SHA variables and test vectors
 #include "testvectors_hmac.c" // HMAC variables and test vectors
 #include "testvectors_kdf.c" // KDF2 variables and test vectors
-
+#include "testvectors_sm2.c" // SM2 variables and test vectors
 
 /*******************************
 *    Variable Definitions      *
@@ -53,6 +53,7 @@ ECPublicKey ECPublicKeyVerify = { ECC_PUB_KEY_SIZE, PublicKeyVerify };
 ECPrivateKey ECPrivKeyVerify = { ECC_PRIV_KEY_SIZE, BYTE_PrivKeyVerify };
 ECPublicKey TestHMAC_key = { DIGEST_SIZE, BYTE_TestHMAC_key }; // Using ECPublicKey for HMAC key
 
+volatile int FlagSessionActive = 0;
 
 // Host software signing certificate authority (CA)
 //-----------------------------------------------------------------------------------
@@ -124,6 +125,39 @@ int APDU(char *str_apdu)
     return V2X_send_apdu(UserID, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 200);
 }
 //-------------------------------------------------------------------------------
+// Verify SM2 signature on the host using OpenSSL
+//-------------------------------------------------------------------------------
+int VerifySM2Signature(BYTE *pubkey, int pubsize,
+                    BYTE *message, int messagesize,
+                    BYTE *signature, int sigsize)
+{
+    int ret;
+    BYTE SignatureBER[512];
+    BYTE digest[DIGEST_SIZE+1];
+
+    //--------------- Verify with OpenSSL ---------------------
+    // Convert r || s signature format to BER-TLV
+    siglen=0;
+    SignatureBER[siglen++] = 0x30;
+    SignatureBER[siglen++] = 0x44;
+    SignatureBER[siglen++] = 0x02;
+    SignatureBER[siglen++] = ECC_PRIV_KEY_SIZE;
+    memcpy(SignatureBER+siglen, signature, ECC_PRIV_KEY_SIZE);
+    siglen += ECC_PRIV_KEY_SIZE;
+    SignatureBER[siglen++] = 0x02;
+    SignatureBER[siglen++] = ECC_PRIV_KEY_SIZE;
+    memcpy(SignatureBER+siglen, signature+ECC_PRIV_KEY_SIZE, ECC_PRIV_KEY_SIZE);
+    siglen += ECC_PRIV_KEY_SIZE;
+
+    Crypto_Hash(message, messagesize, digest, DIGEST_SIZE);
+
+    // Verify signature using OpenSSL
+    ret = (Crypto_SM2_Verify( pubkey, pubsize,
+                                digest, DIGEST_SIZE,
+                                SignatureBER, siglen) == 0)? 1 : 0;
+    return ret;
+}
+//-------------------------------------------------------------------------------
 // Verify signature on the host using OpenSSL
 //-------------------------------------------------------------------------------
 int VerifySignature(BYTE *pubkey, int pubsize,
@@ -148,7 +182,7 @@ int VerifySignature(BYTE *pubkey, int pubsize,
     memcpy(SignatureBER+siglen, signature+1+ECC_PRIV_KEY_SIZE, ECC_PRIV_KEY_SIZE);
     siglen += ECC_PRIV_KEY_SIZE;
 
-   	Crypto_Hash(message, messagesize, digest, DIGEST_SIZE);
+    Crypto_Hash(message, messagesize, digest, DIGEST_SIZE);
 
     // Verify signature using OpenSSL
     ret = (Crypto_ECDSA_Verify( pubkey, pubsize,
@@ -238,7 +272,6 @@ int GetUserKey(int userid)
         // Retrieve current User key ID from V2X Prototype
         if (!V2X_GetKeyID(0, userid, UserKeyID[userid])) { errorflag = 1; return 0; }
     }
-
     // Enter password on the keyboard if it wasn't entered before
     if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) { errorflag = 1; return 0; }
 
@@ -342,6 +375,135 @@ int UseCase_OTA_Verify_Software(BYTE *encrData,  int encrDataSize,
     if (!errorflag) LogScreen("OTA: Data decrypted and signature verified - OK\n");
     return 1;
 }
+//-------------------------------------------------------------------------------
+int Test_SM2()
+{
+    int KeyIndex = 1;		// fixed
+    BYTE C1 [256] = {0x00};
+    BYTE C2 [256] = {0x00};
+    BYTE C3 [256] = {0x00};
+    BYTE plaintext [16] = {0x00};
+
+    LogScreen("SM2 standard sign:\n");
+    LogScreen("------------------------------------\n");
+
+    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;
+
+    MessageSize = UTIL_hexStrToArray(TestVector_SHA_Message[0], MessageData, sizeof(MessageData));
+    Crypto_Hash(MessageData, MessageSize, DigestData, DIGEST_SIZE); // Calculate SHA256 locally - does not matter
+
+    if (!V2X_sm2_sign(	UserID,
+			SM2_DS,
+                        KeyIndex,
+                        DigestData,
+                        DIGEST_SIZE,
+                        Signature,
+                        &SignatureSize))
+    { errorflag = 1; return 0; }
+
+    HexDumpPort("SM2 Signature: ", Signature, SignatureSize);
+    LogScreen("Test:SM2 SignData: Time:%5d ms\n", (unsigned int)(Stat_Time_finish - Stat_Time_start));
+
+    if (VerifySM2Signature(/*BYTE_TestVectorPubKeySM2256_Chip, sizeof(BYTE_TestVectorPubKeySM2256_Chip)*/ ECRecipientPublicKey.blob, ECRecipientPublicKey.len, MessageData, MessageSize, &(Signature[1]), 0x40))
+        { errorflag = 1;  LogError("SM2 Signature verification on the host failed !\n\n"); }
+    else
+	LogScreen("SM2 Signature verified on host - OK\n\n");
+
+    LogScreen("SM2 standard encrypt:\n");
+    LogScreen("------------------------------------\n");
+
+    // we must set both values from outside because the private key value is needed in software for verification later
+    if (!V2X_import_private_key(UserID, SM2_DS, KeyIndex, &ECPrvK_TestVectorSM2256_Chip)) { errorflag = 1; return 0; }
+    if (!V2X_import_public_key(UserID, SM2_DS, KeyIndex, &ECPubK_TestVectorSM2256_Chip)) { errorflag = 1; return 0; }
+
+    HexDumpPort("Message: ", ucSM2_Msg, 0x10);
+
+    // Encrypt on chip
+    if (!V2X_sm2_encrypt(	UserID, 	    	// In: Admin/User ID
+				SM2_DS, 	    	// In: Algorithm/curve: SM2_PKE
+				&ECPubK_TestVectorSM2256_Recipient, 	// In: Recipient public key
+				ucSM2_Msg, 		// In: The plain text data to encrypt (16B, 24B or 32B)
+				0x10, 			// In: The length of the plain text data
+				C1, 			// Out: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				C2, 			// Out: Part 2 of the ciphertext (ciphered message). Size <plainLen>
+				C3))			// Out: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+   { errorflag = 1; return 0; }
+
+   LogScreen("Encrypting message on chip - OK\n");
+   HexDumpPort("C1 (X): ", C1 + 1, 0x20);
+   HexDumpPort("C1 (Y): ", C1 + 1 + 0x20, 0x20);
+   HexDumpPort("C2: ", C2, 0x10);
+   HexDumpPort("C3: ", C3, 0x20);
+
+   // Decrypt on host side
+   if (!Crypto_SM2_Decrypt (BYTE_TestVectorPrivKeySM2256_Recipient,
+                         C1,
+                         C3,
+                         C2,
+                         0x10,
+			 plaintext))
+    { errorflag = 1; return 0; }
+
+    // check if host decryption confirms the calculation
+    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {
+    	LogScreen("SM2 Encrypting on chip and verifying message on host - OK\n\n");
+    }
+    else {
+	LogScreen("SM2 Encrypting on chip and verifying message on host - ERROR!\n\n");
+	HexDumpPort("Decrypting and verifying message - ERROR; SM2 host decrypted message: ", plaintext, 0x10);
+	errorflag = 1;
+	return 0;
+    }
+
+    LogScreen("SM2 standard decrypt:\n");
+    LogScreen("------------------------------------\n");
+
+    // erase result
+    memset(plaintext, '\x00', sizeof(plaintext));
+
+    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;
+
+    // Encrypt on host side
+    if (!Crypto_SM2_Encrypt  (ECRecipientPublicKey.blob,
+                         C1,
+                         C2,
+                         C3,
+                         0x10,
+			 ucSM2_Msg))
+    { errorflag = 1; return 0; }
+
+    LogScreen("Decrypting message on chip ...\n");
+
+    HexDumpPort("Encrypted Message: \nC1 (X): ", C1 + 1, 0x20);
+    HexDumpPort("C1 (Y): ", C1 + 1 + 0x20, 0x20);
+    HexDumpPort("C2: ", C2, 0x10);
+    HexDumpPort("C3: ", C3, 0x20);
+
+    // Decrypt on chip
+    if (!V2X_sm2_decrypt(	UserID, 	// In: Admin/User ID
+			        SM2_DS,		// In: Algorithm/curve: SM2_PKE
+				KeyIndex, 	// In: Recipient private key
+				plaintext, 	// Out: The plain text data to encrypt (16B, 24B or 32B)
+				0x10, 		// In: The length of the plain text data
+				C1, 		// In: Part 1 of the ciphertext (ephemeral public key). Fixed to 65B
+				C2, 		// In: Part 2 of the ciphertext (ciphered message). Size <plainLen>
+				C3))		// In: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
+    { errorflag = 1; return 0; }
+
+    // check if host decryption confirms the calculation
+    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {
+    	LogScreen("SM2 Encrypting on host and decrypting message on chip - OK\n");
+    }
+    else {
+    	LogScreen("SM2 Encrypting on host and decrypting message on chip - ERROR\n");
+     	HexDumpPort("Encrypting and decrypting message on chip - ERROR; SM2 chip decrypted message: ", plaintext, 0x10);
+	errorflag = 1;
+	return 0;
+    }
+
+
+}
+
 //-------------------------------------------------------------------------------
 int Test_ECQV_Reception(PKAlgorithm algid)
 {
@@ -669,6 +831,8 @@ int Test_ECDH(PKAlgorithm algid)
     LogScreen("ECDH key agreement:\n");
     LogScreen("------------------------------------\n");
 
+    if (!Crypto_init(algid)) { errorflag = 1; return 0; }
+
     if (!V2X_import_private_key(UserID, algid, KeyIndex, &ECPrvK_TestVectorECC256_Chip)) { errorflag = 1; return 0; }
 
     if (!V2X_ecdh_derivation(UserID, algid,
@@ -676,6 +840,7 @@ int Test_ECDH(PKAlgorithm algid)
                              &ECPubK_TestVectorECC256_Host, // Testvector: HostPublicKey = QCAVS
                              SharedSecret,
                              &SharedSecretSize)) { errorflag = 1; return 0; }
+
     if (SharedSecretSize != DIGEST_SIZE)
         { LogError("ERROR: Shared secret has incorrect size: len=%d\n", SharedSecretSize); errorflag=1; return 0; }
     HexDumpPort("Secret: ", SharedSecret, SharedSecretSize);
@@ -1020,6 +1185,8 @@ ProgFW_exit:
 		return ret;
 }
 
+
+
 //-------------------------------------------------------------------------------
 //           Main
 //-------------------------------------------------------------------------------
@@ -1044,7 +1211,7 @@ int main(int argc, char *argv[])
 	int count = 0;
 	int JJ = 0;
 	memset(commands, '\x00', sizeof(commands));
-
+	//int FlagSessionActive = 0;		is now global
 
 	// Display menu
 	LogScreen("**************************************\n");
@@ -1192,396 +1359,105 @@ fileinput:
 
 		iScanned = ( i - 1 );
 
-		// Big decision tree
-		if (strcmp(cCommand, "help") == 0) {
-			LogScreen("\nList of all available commands\n");
-			LogScreen("--------------------------------\n");
-
-			LogScreen("help        ... print a list of all available commands (and usage)\n");
-			LogScreen("init        ... creating fresh key files and setting SLS37 V2X Prototype from MANUFACTURING to INITIALIZATION mode.\n");
-			LogScreen("open        ... open secure session by authenticating with user key [0 ... 7] and start secure session\n");
-			LogScreen("close       ... destroy session keys\n");
-			LogScreen("updatefw    ... upload encrypted and signed *.bin firmware update file to the chip\n");
-			LogScreen("testspi     ... test SPI stability with V2X_echo() command\n");
-			LogScreen("info        ... show version string, life cycle state, access conditions, secure session information, etc.\n");
-			LogScreen("printnvm    ... dump content of key slots (public keys) and file slots\n");
-			LogScreen("writefile   ... write data (raw bytes) into a specified file slot; specify 0 or NULL for zeroizing a file\n");
-			LogScreen("readfile    ... reads a file slots\n");
-			LogScreen("importkey   ... import ECC public/private key pair into key slot (parameter: slot id, private key)\n");
-			LogScreen("genkey      ... generate a ECC key pair and store it in one key slot [0 ... 2999]\n");
-			LogScreen("delkey      ... delete one or all key slots\n");
-			LogScreen("setac       ... set a specific Acces Condition Byte (either for key slots, user passwords / keys or the life cycle transition AC bytes)\n");
-			LogScreen("randkeyfile ... Generate encrypted key file using the chip's TRNG\n");
-			LogScreen("pwkeyfile   ... Generate encrypted key file with a symbolic password\n");
-			LogScreen("hexkeyfile  ... Generate encrypted key file with a hex string\n");
-			LogScreen("sendcmd     ... send APDU command (\"e.g. 80CA000000\") and receive response.\n");
-			LogScreen("reset       ... \"Factory Reset\": delete all key slots, file slots, return to MANUFACTURING state, return to default access conditions (if permitted)\n");
-			LogScreen("testsha     ... run SHA256 test vectors (+print timing)\n");
-			LogScreen("testhmac    ... run HMAC test vectors (+print timing)\n");
-			LogScreen("prepecdsa   ... prepare ECDSA seedlings for specific key slots (+print timing)\n");
-			LogScreen("testecdsa   ... run ECDSA test vectors (+print timing)\n");
-			LogScreen("testecdh    ... run ECDH test vector (+print timing)\n");
-			LogScreen("testecqv    ... run ECQV Reception test (+print timing)\n");
-			LogScreen("testecies   ... run ECIES test vectors (+print timing)\n");
-			LogScreen("testaes     ... run AES test vectors (+print timing)\n");
-			LogScreen("testx       ... test all v2x commands\n");
-			LogScreen("q or quit   ... exit the program\n");
-
+		// Big decision tree ------------------------------
+		if ((strcmp(cCommand, "h") == 0) || (strcmp(cCommand, "help") == 0)) {						// help
+			Command_Help();				//puts out an overview for all commands
 			continue;
 		}
-		else if ((strcmp(cCommand, "q") == 0) || (strcmp(cCommand, "quit") == 0) || (strcmp(cCommand, "exit") == 0)) {
+		else if ((strcmp(cCommand, "q") == 0) || (strcmp(cCommand, "quit") == 0) || (strcmp(cCommand, "exit") == 0)) {	// quit
 			LogScreen("Exiting .....\n");
 			goto err_exit;
 		}
-		else if (strcmp(cCommand, "open") == 0) {
-			LogScreen("Open secure session by authenticating with user X\n");
-			LogScreen("------------------------------------\n");
-
-			if (iScanned > 1)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the user to be used for authentication [0 ... 7]!\n");
-
-BYTE ConvertAlgID(BYTE alg);			// First argument (optional): UserID
-			if (strlen(cCommandArg[0]) == 0) {
-				LogScreen("\nPlease specify the index of the user to be used for authentication [0 ... 7]!\n");
-				scanf("%d", &UserID);
-			}
-			else {
-				UTIL_hexStrToArray(cCommandArg [0], (BYTE *)&UserID, 1);
-			}
-
-			if (!GetUserKey(UserID)) { errorflag = 1; break; }
-			if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) break;
-
-			LogScreen("User %d: session opened successfully\n", UserID);
+		else if (strcmp(cCommand, "open") == 0) {									// open
+			int ret = 0;
+			ret = Command_Open(iScanned, cCommandArg);
+			if (ret == BREAK_REP) { break; }
 			continue;
 		}
-		else if (strcmp(cCommand, "close") == 0) {
-			LogScreen("Destroy all session keys\n");
-			LogScreen("------------------------------------\n");
-
-			if (iScanned > 0)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n");
-
-
-			for (i = 0; i < MAX_USERS; i++)
-				if (V2X_Close(i) == 0) break;
-
-			memset(SessionActive, 0, sizeof(SessionActive));
-			memset(SessionID, 0, sizeof(SessionID));
-
-			LogScreen("All sessions closed successfully\n");
+		else if (strcmp(cCommand, "close") == 0) {									// close
+			int ret = 0;
+			ret = Command_Close(iScanned);
+			if (ret == BREAK_REP) { break; }
 			continue;
 		}
-		else if (strcmp(cCommand, "testx") == 0) {
+		else if (strcmp(cCommand, "testx") == 0) {									// testx
 			Test_All_V2X(ECDSA_NISTP256_WITH_SHA256); // All V2X commands test
 			continue;
 		}
-		else if (strcmp(cCommand, "testspi") == 0) {
-			LogScreen("Running SPI communication stability test 100K times ... (Press ESC to stop)\n");
-			LogScreen("----------------------------------------------------------------------------\n");
-
-			if (iScanned > 0)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n");
-
-			UserID = 0; // No secure session
-			V2X_FirmwareVersion = V2X_firmware_version(0, strng);
-			Save_LogLevel = LogLevel;
-			LogLevel = 1;
-			TestEcho(1, 0);
-			LogLevel = Save_LogLevel;
-
-			LogScreen("SPI test passed successfully\n");
+		else if (strcmp(cCommand, "testspi") == 0) {									// testspi
+			Command_TestSPI(iScanned);
 			continue;
 		}
-		else if (strcmp(cCommand, "info") == 0) {
-			LogScreen("V2X Prototype information:\n");
-			LogScreen("------------------------------------\n");
-
-			if (iScanned > 0)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n");
-
-			if ((V2X_FirmwareVersion = V2X_firmware_version(UserID, strng)) == 0) { errorflag = 1; break; }
-			LogScreen("Firmware version: %s\n\n", strng);
-
-			if (i = V2X_get_lifecycle_state(UserID))
-				LogScreen("Life cycle state: %02X - %s\n\n", i, (i == 1) ? "Manufacturing" :
-				((i == 4) ? "Initialization" :
-					((i = 0x10) ? "Operation" : "ERROR")));
-			eSize = V2X_GetMemoryInfo(UserID);
-			LogScreen("Total Private key slots in HSM : %d\n\n", eSize);
-
-			if (!V2X_GetChipInfo(UserID, ChipID)) { errorflag = 1; break; }
-			HexDump("V2X Prototype serial number: ", ChipID, 12);
-
-			BYTE GetDataAPDU[] = { 0x80, 0xCA, 0x00, 0xFE, 0x10 };
-			if (!V2X_send_apdu(UserID, GetDataAPDU, sizeof(GetDataAPDU), RESP_APDU, &RESP_APDU_size, 100))
-				break;
-			HexDump("OS CRC:            ", RESP_APDU, 4);
-
-			if (!V2X_GetKeyID(UserID, 0, UserKeyID[0])) break;
-			HexDump("Transport key ID:  ", UserKeyID[0], KEYIDSIZE);
-
-			if (!V2X_GetKeyID(UserID, 1, UserKeyID[1])) break;
-			HexDump("Admin key ID:      ", UserKeyID[1], KEYIDSIZE);
-
-			for (i = 2; i<8; i++) {
-				if (!V2X_GetKeyID(UserID, i, UserKeyID[i])) break;
-				LogScreen("User %d key ID:     ", i);
-				HexDump("", UserKeyID[i], KEYIDSIZE);
-			}
-			if (!V2X_GetKeyID(UserID, 0xC3, FwUpdateKeyID)) break;
-			HexDump("V2X Prototype Firmware update encryption key ID:  ", FwUpdateKeyID, KEYIDSIZE);
-			if (!V2X_GetKeyID(UserID, 0xC6, FwCApublicKeyID)) break;
-			HexDump("V2X Prototype Firmware signing CA public key ID:  ", FwCApublicKeyID, KEYIDSIZE);
-
-			LogScreen("Information retrieved successfully\n");
+		else if ((strcmp(cCommand, "i") == 0) || (strcmp(cCommand, "info") == 0)) {					// info
+			int ret = 0;
+			ret = Command_Info(iScanned);
+			if (ret == BREAK_REP) { break; }
 			continue;
 		}
-		else if (strcmp(cCommand, "genkey") == 0) {
-			LogScreen("Generate ECC key pair:\n");
-			LogScreen("------------------------------------\n");
-
-			if (iScanned > 1)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the key to be generated!\n");
-
-			// First argument (optional): KeyIndex
-			if (strlen(cCommandArg[0]) != 0) {
-				KeyIndex = atoi((const char*)&(cCommandArg[0]));
-			}
-			else {
-				KeyIndex = 0;
-			}
-
-			if (V2X_keygen(UserID, AlgID, KeyIndex, &ECRecipientPublicKey))
-				HexDump("Public key: ", ECRecipientPublicKey.blob, ECRecipientPublicKey.len);
-
-			LogScreen("Key %d created successfully\n", KeyIndex);
+		else if (strcmp(cCommand, "genkey") == 0) {									// genkey
+			int ret = 0;
+			ret = Command_Genkey(iScanned, cCommandArg);			                       
+			if (ret == CONTINUE_REP) { continue; }
 			continue;
 		}
-		else if (strcmp(cCommand, "delkey") == 0) {
-			LogScreen("Erase key slot:\n");
-			LogScreen("------------------------------------\n");
-
-			if (iScanned > 1)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the key to be erased!\n");
-
-			// First argument (optional): kIndex
-			if (strlen(cCommandArg[0]) != 0) {
-				kIndex = atoi((const char*)&(cCommandArg[0]));
-			}
-			else {
-				kIndex = 0;
-			}
-
-			if (V2X_DeletePrivateKey(UserID, kIndex))
-				LogScreen("%d: erased\n", kIndex);
-
-			LogScreen("Key %d erased successfully\n", kIndex);
+		else if (strcmp(cCommand, "delkey") == 0) {									// delkey
+			Command_Delkey(iScanned, cCommandArg);
 			continue;
 		}
-		else if (strcmp(cCommand, "reset") == 0) {
-			LogScreen("Zeroize V2X Prototype keys, return to Manufacturing state\n");
-			LogScreen("---------------------------------------------------------\n");
-
-			if (iScanned > 0)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n");
-
-			UserID = 1; // Authenticate Admin - no other choice
-			if (!GetUserKey(UserID)) { errorflag = 1; return 0; }
-
-			if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) break;
-			if (V2X_DeletePrivateKey(UserID, 0xFFFF))
-				LogScreen("V2X Prototype zeroized\n");
+		else if (strcmp(cCommand, "reset") == 0) {									// reset
+			int ret = 0;
+			ret = Command_Reset(iScanned);
+			if (ret == RETURN_0_REP) {return 0; }
+			if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "printnvm") == 0) {
-			LogScreen(" Slot          Public key\n");
-			LogScreen("---------------------------------------------------------------------\n");
-
-			if (iScanned > 0)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n");
-
-			Save_LogLevel = LogLevel; Save_LogLevelFile = LogLevelFile;
-			LogLevel = 0; LogLevelFile = 0;
-
-			for (kIndex = 1; kIndex <= ECC_MAX_KEY_SLOT; kIndex++) {
-				char str[20] = { 0x00 };
-				V2X_export_private_key(UserID, kIndex, &ECPrivKeyChip);
-				if (!V2X_export_public_key(UserID, kIndex, &ECEphemeralPublicKey)) { errorflag = 1; break; }
-
-				LogLevel = Save_LogLevel; LogLevelFile = Save_LogLevelFile;
-				if (ECPrivKeyChip.len > 2) {
-					sprintf(str, "%4d: Private  ", kIndex);
-					HexDump(str, ECPrivKeyChip.blob, ECPrivKeyChip.len);
-				}
-				if (ECEphemeralPublicKey.len > 2) {
-					sprintf(str, "%4d: Public   ", kIndex);
-					HexDump(str, ECEphemeralPublicKey.blob, ECEphemeralPublicKey.len);
-				}
-				LogLevel = 0; LogLevelFile = 0;
-			}
-			LogLevel = Save_LogLevel; LogLevelFile = Save_LogLevelFile;
+		else if (strcmp(cCommand, "printnvm") == 0) {									// printnvm
+			int ret = 0;
+			ret = Command_Printnvm(iScanned);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "testsha") == 0) {
+		else if (strcmp(cCommand, "testsha") == 0) {									// tesetsha
 			Test_SHA();
 		}
-		else if (strcmp(cCommand, "testhmac") == 0) {
+		else if (strcmp(cCommand, "testhmac") == 0) {									// testmac
 			Test_HMAC();
 		}
-		else if (strcmp(cCommand, "prepecdsa") == 0) {
-
-			if (iScanned > 1)
-				LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: \'l\' (for fast signature speed test) or the number of slots to be prepared!\n");
-			eSize = 5; // default value to be prepared
-			if (strlen(cCommandArg[0]) > 0)
-			{
-				if (cCommandArg[0][0] == 'l')
-				{
-					LogScreen("Fast signature test ... (Press ESC to stop)\n");
-					LogScreen("------------------------------------------------------------\n");
-
-					Save_LogLevel = LogLevel;
-					LogLevel = 1;
-
-					if (!Test_FastECDSA_Step1(AlgID, 50)) break;
-					if (!Test_FastECDSA_Step2(AlgID)) break;
-
-					LogScreen("Speed test:\n");
-					Test_Time = 0;
-					Test_Time_Min = 1000;
-					Test_Time_Max = 0;
-					for (trans_num = 0, errors_num = 0; trans_num < 100; trans_num++)
-					{
-						if (!V2X_ecdsa_fast_sign(UserID, AlgID,
-							KeyIndex,
-							DigestData,
-							DIGEST_SIZE,
-							Signature,
-							&SignatureSize)) errors_num++;
-						else if (VerifySignature(BYTE_TestVectorPubKeyECC256_Chip, sizeof(BYTE_TestVectorPubKeyECC256_Chip),
-							MessageData, MessageSize,
-							Signature, SignatureSize)) errors_num++;
-
-						LogScreen("Test:%5d  Errors:%4d  Time:%5d ms\n", trans_num + 1, errors_num, (unsigned int)(Stat_Time_finish - Stat_Time_start));
-
-						Test_Time += (uint64_t)(Stat_Time_finish - Stat_Time_start);
-						if (Stat_Time_finish - Stat_Time_start > Test_Time_Max) Test_Time_Max = (uint64_t)(Stat_Time_finish - Stat_Time_start);
-						if (Stat_Time_finish - Stat_Time_start < Test_Time_Min) Test_Time_Min = (uint64_t)(Stat_Time_finish - Stat_Time_start);
-
-						if (checkKey() == ESC_KEY) break;  // Stop cycle if ESC key pressed
-					}
-					LogScreen("\n=========================================================\n");
-					LogScreen("Errors:%4d  Min.time:%5d ms  Max.time:%5d ms  Average:%5d ms\r",
-						errors_num, (unsigned int)Test_Time_Min, (unsigned int)Test_Time_Max, (unsigned int)((Test_Time_Max + Test_Time_Min) / 2));
-
-					if (errors_num) errorflag = 1;
-
-					LogLevel = Save_LogLevel;
-					continue;
-				}
-				else
-					eSize = atoi(&(cCommandBuffer[10]));
-			}
-			else {
-				LogScreen("Enter number of slots to prepare: ");
-				scanf("%d", &eSize);
-			}
-
-			Test_FastECDSA_Step1(AlgID, eSize);
+		else if (strcmp(cCommand, "prepecdsa") == 0) {									// prepecdsa
+			int ret = 0;
+                        ret = Command_Prepecdsa(iScanned, cCommandArg, cCommandBuffer);
+                        if (ret == BREAK_REP) { break; }
+                        if (ret == CONTINUE_REP) { continue; }
 		}
-		else if (strncmp(cCommandBuffer, "testecdsa", 9) == 0) {
+		else if (strncmp(cCommandBuffer, "testecdsa", 9) == 0) {							// testecdsa
 			Test_FastECDSA_Step2(AlgID);
 			Test_ECDSA_standard(AlgID);
 		}
-		else if (strncmp(cCommandBuffer, "testecdh", 8) == 0) {
+		else if (strncmp(cCommandBuffer, "testsm2", 9) == 0) {								// testsm2
+			Test_SM2();
+		}
+		else if (strncmp(cCommandBuffer, "testecdh", 8) == 0) {								// testecdh
 			Test_ECDH(AlgID);
 		}
-		else if (strncmp(cCommandBuffer, "testecqv", 8) == 0) {
+		else if (strncmp(cCommandBuffer, "testecqv", 8) == 0) {								// testevqv
 			Test_ECQV_Reception(AlgID);
 		}
-		else if (strncmp(cCommandBuffer, "testecies", 9) == 0) {
+		else if (strncmp(cCommandBuffer, "testecies", 9) == 0) {							// testecies
 			Test_ECIES_test_vectors(AlgID);
 			Test_ECIES_encrypt_decrypt(AlgID);
 		}
-		else if (strncmp(cCommandBuffer, "testaes", 7) == 0) {
-			LogScreen("AES test - encrypt and decrypt\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			UserID = 1; // Authenticate Admin
-			if (!GetUserKey(UserID)) { errorflag = 1; break; }
-			if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) break;
-
-			for (TestSize = 1; TestSize <= MAX_DATA_SIZE - 16; TestSize++)
-			{
-				if (checkKey() == ESC_KEY) continue;  // Stop cycle if ESC key pressed
-
-				for (i = 0; i < TestSize; i++)
-					TestData[i] = (BYTE)((i >> 8) + (i & 0xFF));   // Prepare data for writing
-
-				if (!V2X_AES_encrypt(UserID, SoftwareEncryptionKeyIndex, TestData, TestSize, EncrData, &EncrDataSize))
-				{
-					errorflag = 1; LogError("Encryption failed !!!\n"); break;
-				}
-
-				else if (!V2X_AES_decrypt(UserID, SoftwareEncryptionKeyIndex, EncrData, EncrDataSize, PlainData, &PlainDataSize))
-				{
-					errorflag = 1; LogError("Decryption failed !!!\n"); break;
-				}
-
-				else if (memcmp(TestData, PlainData, TestSize) != 0)
-				{
-					errorflag = 1; LogError("Decrypted data incorrect !!!\n"); break;
-				}
-
-				if (checkKey() == ESC_KEY) break;  // Stop cycle if ESC key pressed
-
-				LogScreen("Data size:%5d  Time:%5d ms\r", TestSize, (unsigned int)(Stat_Time_finish - Stat_Time_start));
-			}
-			LogScreen("\n");
+		else if (strncmp(cCommandBuffer, "testaes", 7) == 0) {								// testaes
+			int ret = 0;
+			ret = Command_TestAES();
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == BREAK_REP) { break; }
 		}
-		else if (strncmp(cCommandBuffer, "randkeyfile", 10) == 0) {
-			LogScreen("Create random encrypted key file using V2X Prototype random generator\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			// Get file encryption password (command line or type in on keyboard)
-			if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) break;
-
-			memset(UserKey, 0, sizeof(UserKey));     // Clear keys array
-			memset(UserKeySize, 0, sizeof(UserKeySize)); // Clear key size array
-			memset(UserKeyID, 0, sizeof(UserKeyID));   // Clear keyID array
-
-			if (iScanned == 0) { // No -kx arguments - generate one random key and save it to file
-				if (!V2X_GetRandom(UserID, USER_KEY_SIZE, UserKey[0])) continue;
-				HexDump("Generated key: ", UserKey[0], USER_KEY_SIZE);
-				if (!Save_Key(UserKey[0], USER_KEY_SIZE, UserKeyID[0])) continue;
-			}
-			else { // Scan -kx arguments - generate random keys for each argument and save them to files, create init.txt script
-				int cnt = 0;
-				for (; cnt < iScanned; cnt++) {
-					if (cCommandArg[cnt][0] != '-' || cCommandArg[cnt][1] != 'k' || cCommandArg[cnt][2]  < '0' || cCommandArg[cnt][2]  > '7') {
-						LogError("ERROR: Wrong command line parameter %d, should be -k{0..7}\n", cnt);
-						continue;
-					}
-					int keynum = cCommandArg[cnt][2] & 0x0F;
-					UserKeySize[keynum] = USER_KEY_SIZE; // fix Key size - AES256
-				}
-				char tempstr[2000] = { 0x00 };
-				sprintf(tempstr, "init -psw %s", UtilPassword);
-
-				for (cnt = 0; cnt < MAX_USERS; cnt++) {
-					if (UserKeySize[cnt]) {
-						LogScreen("Generating random User %d key\n", cnt); //  generate and save to file the random key for each -kx option
-						if (!V2X_GetRandom(UserID, USER_KEY_SIZE, (BYTE*)UserKey[cnt])) continue;
-						HexDump("    ", UserKey[cnt], UserKeySize[cnt]);
-						if (!Save_Key(UserKey[cnt], UserKeySize[cnt], UserKeyID[cnt])) continue;
-						sprintf(tempstr + strlen(tempstr), " -k%d %02X%02X%02X%02X.key", cnt, UserKeyID[cnt][0], UserKeyID[cnt][1], UserKeyID[cnt][2], UserKeyID[cnt][3]);
-					}
-				}
-				char cmdline[MAX_PATH + 1] = { "./init.txt" };
-				if (!SaveToFile(cmdline, tempstr, strlen(tempstr) + 1))
-					LogError("\nERROR: Command line file '%s' writing error\n\n", cmdline);
-			}
+		else if (strncmp(cCommandBuffer, "randkeyfile", 10) == 0) {							// randkeyfile
+			int ret = 0;
+                        ret = Command_Randkeyfile(iScanned, cCommandArg);
+                        if (ret == CONTINUE_REP) { continue; }
+                        if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "init") == 0) {
+		else if (strcmp(cCommand, "init") == 0) {									// init
 			// optional: send a .txt file as content to be processed
 			char cFilePath[MAX_PATH] = { 0x00 };
 			if (strcmp(cCommandArg[0], "-f") == 0) {
@@ -1624,176 +1500,59 @@ BYTE ConvertAlgID(BYTE alg);			// First argument (optional): UserID
 
 			if (!Initialize_HSM()) continue;  // Change HSM life cycle and Transport key
 		}
-		else if (strcmp(cCommand, "pwkeyfile") == 0) {
-			LogScreen("Create encrypted key file using entered symbolic password\n");
-			LogScreen("---------------------------------------------------------\n");
-
-			// Get file encryption password (command line or type in on keyboard)
-			if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) break;
-
-			char EnteredKey[128] = { 0x00 };
-			if (iScanned == 1 && strlen(cCommandArg[0]) <= 2*USER_KEY_SIZE) strcpy(EnteredKey, cCommandArg[0]);
-			else if (!Ask_Password("Please enter password (8-32 characters): ", EnteredKey)) continue;
-
-			Save_Key((BYTE*)EnteredKey, strlen(EnteredKey), UserKeyID[0]);
+		else if (strcmp(cCommand, "pwkeyfile") == 0) {									// pwdkeyfile
+			int ret = 0;
+			ret = Command_Pwkeyfile(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "hexkeyfile") == 0) {
-			LogScreen("Create encrypted key file using entered HEX key\n");
-			LogScreen("--------------------------------------------------------\n");
-
-			char HexKey[1025] = { 0x00 };
-			if (iScanned == 1 && strlen(cCommandArg[0]) <= sizeof(HexKey) - 1)
-				strcpy(HexKey, cCommandArg[0]);
-			else {
-				LogScreen("Please enter HEX key value (8-32 bytes): ");
-				scanf("%1024s", HexKey);
-			}
-			BYTE BinaryKey[512] = { 0x00 };
-			int BinaryKeySize = UTIL_hexStrToArray(HexKey, BinaryKey, sizeof(BinaryKey));
-			if (BinaryKeySize < 8) { LogError("ERROR: Too short HEX value: %d bytes\n", BinaryKeySize); continue; }
-
-			Save_Key(BinaryKey, BinaryKeySize, UserKeyID[0]);
+		else if (strcmp(cCommand, "hexkeyfile") == 0) {									// hexkeyfile
+			int ret = 0;
+			ret = Command_Hexkeyfile(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "sendcmd") == 0) {
-			LogScreen("Send APDU command and receive response\n");
-			LogScreen("----------------------------------------\n");
-
-			char cCommandFrame[2 * MAX_APDU_SIZE] = { 0x00 };
-			if (iScanned >= 1) {
-				strcpy(cCommandFrame, cCommandArg[0]);
-				if (iScanned > 1)
-					LogScreen("\nIllegal arguments detected - will be ignored! \n");
-			}
-			else {
-				LogScreen("Please enter APDU command: ");
-				scanf("%3600s", cCommandFrame);
-			}
-
-			BYTE ucBinaryFrame[MAX_APDU_SIZE] = { 0x00 };
-			int BinaryFrameSize = UTIL_hexStrToArray(cCommandFrame, ucBinaryFrame, sizeof(ucBinaryFrame));
-			if ((BinaryFrameSize < 4) || (BinaryFrameSize > MAX_APDU_SIZE)) { LogError("ERROR: wrong command size\n");  continue; }
-
-			int iRet = 0;
-			Save_LogLevel = LogLevel;
-			LogLevel = 3;
-
-			memset(RESP_APDU, '\x00', sizeof(RESP_APDU));
-			RESP_APDU_size = 0;
-			// ???
-			do
-			{
-				iRet = SPI_protocol_send(ucBinaryFrame, BinaryFrameSize, RESP_APDU, &RESP_APDU_size, MAX_APDU_TRIES, 1000);
-				if (checkKey() == ESC_KEY) continue;  // Stop cycle if ESC key pressed
-			} while (iRet != 1);
-
-			LogLevel = Save_LogLevel;
-			//LogScreen("\n=========================================================\n");
+		else if (strcmp(cCommand, "sendcmd") == 0) {									// sendcmd
+			int ret = 0;
+			ret = Command_Sendcmd(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
 		}
-		else if (strcmp(cCommand, "setac") == 0) {
-			LogScreen("Change / Set Access Condition Byte\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			/*
-			get:
-			mode:   0x00 - get files access conditions array
-			        0x01 - get keys access conditions array
-	                0x02 - get V2X Prototype life cycle access conditions array
-			set:
-					fileID (0, 0xE000 ... 0xE009)
-					keyID (0xF000...0xF007)
-					Lifecycle AC (0xFFFF)
-			*/
-
-			if (iScanned != 3 ) {
-				LogScreen("Please use the correct format (3 values required): type of AC [userX, fileX or lifecycle], byte to change [byteX], value where x ... [0 ... 7]");
-				continue;
-			}
-
-			BYTE ucMode = 0;
-			BYTE ucIndex = 0;
-			BYTE ucByteNumber = 0x00;
-			BYTE ucValue = 0x00;
-
-			if (strcmp(cCommandArg[0], "lifecycle") == 0) {
-				ucMode = 0x02;
-			}
-			else if (strncmp(cCommandArg[0], "user", 4) == 0)
-			{
-				ucMode = 0x01;
-				if (sscanf(cCommandArg[0], "user%hhx", &ucIndex) != 1)
-					continue;
-
-				// allowed range: 1 ... 8 AC_Keys[MAX_USERS], MAX_USERS 8
-				if ((ucIndex < 1) || (ucIndex > 8)) {
-					LogScreen("Illegal value of parameter userX; allowed: userX, whereas X is in the range [1 ... 8] \n");
-					continue;
-				}
-				// decrement for 0 based index
-				ucIndex--;
-			}
-			else if (strncmp(cCommandArg[0], "file", 4) == 0)
-			{
-				ucMode = 0x00;
-				if (sscanf(cCommandArg[0], "file%hhx", &ucIndex) != 1)
-					continue;
-
-				// allowed range: 1 ... 11 [AC_Files[1+MAX_NVM_FILES], MAX_NVM_FILES 10
-				if ((ucIndex < 1) || (ucIndex > 11)) {
-					LogScreen("Illegal value of prameter fileX; allowed: fileX, whereas X is in the range [1 ... 11] \n");
-					continue;
-				}
-				// decrement for 0 based index
-				ucIndex--;
-			}
-			else {
-				LogScreen("Illegal value of prameter 1; allowed: userX, fileX or lifecycle \n");
-				continue;
-			}
-
-			if (sscanf(cCommandArg[1], "byte%hhx", &ucByteNumber) != 1) {
-				LogScreen("Illegal value of prameter 2; allowed: byteX \n");
-				continue;
-			}
-
-			if (sscanf(cCommandArg[2], "%hhx", &ucValue) != 1) {
-				LogScreen("Illegal value of prameter 3; allowed: single byte \n");
-				continue;
-			}
-
-			LogScreen("Authenticate user 0 and start secure session\n");
-			UserID = 0;
-			// Authenticate
-			if (!GetUserKey(UserID)) { errorflag = 1; break; }
-			if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) break;
-			BYTE ucACs[128] = { 0x00 };
-			V2X_get_access_conditions(UserID, ucMode, ucACs );
-			ucACs[ucByteNumber + (ucIndex * AC_SIZE)] = ucValue;
-			LogScreen("Change V2X keys AC - User 0 auth required\n");
-
-			unsigned short sIndex = 0x0000;
-			switch (ucMode)
-			{
-			case 0x02:
-				// Lifecycle
-				sIndex = NVM_OFFSET_LIFECYCLE;
-				break;
-			case 0x01:
-				// User
-				sIndex = (NVM_OFFSET_PASSWORDS + ucIndex);
-				break;
-			case 0x00:
-				// File
-				sIndex = (NVM_OFFSET_FILES + ucIndex);
-				break;
-			default:
-				errorflag = 1; break;
-			};
-
-			if (V2X_change_access_conditions(UserID, sIndex, &(ucACs[(ucIndex * AC_SIZE)]), AC_SIZE) == 0) break;
-			V2X_Close(UserID); // Close Admin session with HSM
-
+                else if (strcmp(cCommand, "sendcmd2") == 0) {                                                                   // sendcmd2
+                        int ret = 0;
+                        ret = Command_Sendcmd2(iScanned, cCommandArg);
+			if (ret == BREAK_REP) { break; }
+                }
+		else if (strcmp(cCommand, "setac") == 0) {									// setac
+			int ret = 0;
+                        ret = Command_Setac(iScanned, cCommandArg);
+                        if (ret == CONTINUE_REP) { continue; }
+                        if (ret == BREAK_REP) { break; }
 		}
-		else if (strcmp(cCommand, "returnfl") == 0) {
+		else if (strcmp(cCommand, "writefile") == 0) {									// writefile
+			int ret = 0;
+			ret = Command_Writefile(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == RETURN_0_REP) {return 0; }
+			if (ret == BREAK_REP) { break; }
+		}
+		else if (strcmp(cCommand, "readfile") == 0) {									// readfile
+			int ret = 0;
+			ret = Command_Readfile(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == RETURN_0_REP) {return 0; }
+			if (ret == BREAK_REP) { break; }
+		}
+		else if (strcmp(cCommand, "importkey") == 0) {									// importkey
+			int ret = 0;
+			ret = Command_Importkey(iScanned, cCommandArg);
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == RETURN_0_REP) {return 0; }
+			if (ret == BREAK_REP) { break; }
+		}
+		else if (strcmp(cCommand, "updatefw") == 0) {									// updatefw
+			Command_UpdateFW(iScanned, cCommandArg);
+		}
+		else if (strcmp(cCommand, "returnfl") == 0) {									// returnfl
 			LogScreen("Return to flash loader - FOR IFX INTERNAL USE ONLY! \n");
 			LogScreen("------------------------------------------------------------\n");
 
@@ -1822,133 +1581,6 @@ BYTE ConvertAlgID(BYTE alg);			// First argument (optional): UserID
 			//else LogError("\nERROR: FlashLoader reactivation failed !!!\n");
 			break;
 		}
-		else if (strcmp(cCommand, "writefile") == 0) {
-			if (iScanned != 2) {
-				LogScreen("Please use the correct format (2 values required): file index, data to be written \n");
-				continue;
-			}
-
-			int FileID = 0;
-			if (strlen(cCommandArg[0]) != 0) {
-				FileID = atoi((const char*)&(cCommandArg[0]));
-			}
-
-			BYTE ucData[MAX_DATA_SIZE] = { 0x00 };
-			int iDataLen;
-			if((strcmp(cCommandArg[1], "0") == 0) || (strcmp(cCommandArg[1], "NULL") == 0))
-			{
-				// nothing to do
-				iDataLen = sizeof(ucData);
-				LogScreen("Erase File \n");
-
-			}
-			else
-			{
-				iDataLen = UTIL_hexStrToArray(cCommandArg[1], ucData, sizeof(ucData));
-				if (iDataLen == 0) {
-					LogScreen("Illegal value of prameter 2; max allowed: 1800 byte \n");
-					continue;
-				}
-				LogScreen("Write Data to File \n");
-			}
-			LogScreen("------------------------------------------------------------\n");
-
-			UserID = 1;
-			if (!GetUserKey(UserID)) { errorflag = 1; return 0; }
-
-			if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) break;
-
-			if (!V2X_write_file(UserID, FileID, ucData, iDataLen)) break;
-
-		}
-		else if (strcmp(cCommand, "readfile") == 0) {
-			if (iScanned != 1) {
-				LogScreen("Please use the correct format (1 value required): file index\n");
-				continue;
-			}
-			LogScreen("Read file content\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			int FileID = 0;
-			if (strlen(cCommandArg[0]) != 0) {
-				FileID = atoi((const char*)&(cCommandArg[0]));
-			}
-
-			UserID = 1;
-			if (!GetUserKey(UserID)) { errorflag = 1; return 0; }
-
-			if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) break;
-
-			BYTE ucData[MAX_DATA_SIZE] = { 0x00 };
-			int iDataLen = sizeof(ucData);
-			if (!V2X_read_file(UserID, FileID, ucData, &iDataLen)) break;
-
-			HexDump("File content: ", ucData, iDataLen);
-			LogScreen("\n============================================================\n");
-		}
-		else if (strcmp(cCommand, "importkey") == 0) {
-
-			if (iScanned != 2) {
-				LogScreen("Please use the correct format (2 values required): key index, key data to be imported \n");
-				continue;
-			}
-
-			LogScreen("Import Private Key\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			// First argument (optional): KeyIndex
-			if (strlen(cCommandArg[0]) != 0) {
-				KeyIndex = atoi((const char*)&(cCommandArg[0]));
-			}
-			else {
-				KeyIndex = 0;
-			}
-			BYTE BYTE_PrivKeyImport[ECC_PRIV_KEY_SIZE];
-			int iPrivKeyLen = UTIL_hexStrToArray(cCommandArg[1], BYTE_PrivKeyImport, sizeof(BYTE_PrivKeyImport));
-			if (iPrivKeyLen == 0) {
-				LogScreen("Illegal value of prameter 2; max allowed: 32 byte \n");
-				continue;
-			}
-
-			UserID = 1;
-			if (!GetUserKey(UserID)) { errorflag = 1; return 0; }
-
-			if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) break;
-
-			ECPrivateKey ECPrivKeyImport = { ECC_PRIV_KEY_SIZE, BYTE_PrivKeyImport };
-
-			if (V2X_import_private_key(UserID, AlgID, KeyIndex, &ECPrivKeyImport) == 0) {
-				Log("\nError importing private key!\n");
-			}
-			// reconstruct public key
-			if (!V2X_ecqv_reception(UserID, AlgID,
-				KeyIndex,
-				KeyIndex,
-				NULL, 0,
-				NULL, 0,
-				NULL, 0,
-				&ECPublicKeyChip)) {
-				errorflag = 1; return 0;
-			}
-
-			if (V2X_import_public_key(UserID, AlgID, KeyIndex, &ECPublicKeyChip) == 0) {
-				Log("\nError importing public key!\n");
-			}
-
-			LogScreen("Key %d imported successfully\n", KeyIndex);
-		}
-		else if (strcmp(cCommand, "updatefw") == 0) {
-			if (iScanned != 1) {
-				LogScreen("Please use the correct format (1 value required): firmware file (*.bin)\n");
-				continue;
-			}
-			LogScreen("Update firmware ...\n");
-			LogScreen("------------------------------------------------------------\n");
-
-			if (Program_HSM_Firmware(cCommandArg[0]) == 0) {
-				Log("\nError updating firmware!\n");
-			}
-		}
 		else {
 			LogScreen("Unknown or unsupported command %s!\n", cCommand);
 		}
@@ -1960,4 +1592,791 @@ err_exit:
 	V2X_Shutdown(); // Turn off the SPI host adapter's power pins and close the SPI host adapter
 
 	return 0;
+}
+
+
+void Command_Help() {
+	LogScreen("\nList of all available commands\n");
+
+        LogScreen("--------------------------------\n");
+        LogScreen("help        ... print a list of all available commands (and usage)\n");
+        LogScreen("init        ... creating fresh key files and setting SLS37 V2X Prototype from MANUFACTURING to INITIALIZATION mode.\n");
+        LogScreen("open        ... open secure session by authenticating with user key [0 ... 7] and start secure session\n");
+        LogScreen("close       ... destroy session keys\n");
+        LogScreen("updatefw    ... upload encrypted and signed *.bin firmware update file to the chip\n");
+        LogScreen("testspi     ... test SPI stability with V2X_echo() command\n");
+        LogScreen("info        ... show version string, life cycle state, access conditions, secure session information, etc.\n");
+        LogScreen("printnvm    ... dump content of key slots (public keys) and file slots\n");
+        LogScreen("writefile   ... write data (raw bytes) into a specified file slot; specify 0 or NULL for zeroizing a file\n");
+        LogScreen("readfile    ... reads a file slots\n");
+        LogScreen("importkey   ... import ECC public/private key pair into key slot (parameter: slot id, private key)\n");
+        LogScreen("genkey      ... generate a ECC key pair and store it in one key slot [0 ... 2999]\n");
+        LogScreen("delkey      ... delete one or all key slots\n");
+        LogScreen("setac       ... set a specific Acces Condition Byte (either for key slots, user passwords / keys or the life cycle transition AC bytes)\n");
+        LogScreen("randkeyfile ... Generate encrypted key file using the chip's TRNG\n");
+        LogScreen("pwkeyfile   ... Generate encrypted key file with a symbolic password\n");
+        LogScreen("hexkeyfile  ... Generate encrypted key file with a hex string\n");
+        LogScreen("sendcmd     ... send APDU command (\"e.g. 80CA000000\") and receive response.\n");
+	LogScreen("sendcmd2    ... send APDU command (\"e.g. 30CA000000\") but use a secure channel.\n");
+        LogScreen("reset       ... \"Factory Reset\": delete all key slots, file slots, return to MANUFACTURING state, return to default access conditions (if permitted)\n");
+        LogScreen("testsha     ... run SHA256 test vectors (+print timing)\n");
+        LogScreen("testhmac    ... run HMAC test vectors (+print timing)\n");
+        LogScreen("prepecdsa   ... prepare ECDSA seedlings for specific key slots (+print timing)\n");
+        LogScreen("testecdsa   ... run ECDSA test vectors (+print timing)\n");
+        LogScreen("testecdh    ... run ECDH test vector (+print timing)\n");
+        LogScreen("testecqv    ... run ECQV Reception test (+print timing)\n");
+        LogScreen("testecies   ... run ECIES test vectors (+print timing)\n");
+        LogScreen("testaes     ... run AES test vectors (+print timing)\n");
+        LogScreen("testsm2     ... run SM2 algorithm test (+print timing)\n");
+        LogScreen("testx       ... test all v2x commands\n");
+        LogScreen("q or quit   ... exit the program\n");
+}
+
+int Command_Open(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Open secure session by authenticating with user\n");
+	LogScreen("------------------------------------\n");
+
+	if (iScanned > 1)
+		LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the user to be used for authentication [0 ... 7]!\n");
+
+	BYTE ConvertAlgID(BYTE alg);			// First argument (optional): UserID
+	if (strlen(cCommandArg[0]) == 0) {
+		LogScreen("\nPlease specify the index of the user to be used for authentication [0 ... 7]!\n");
+		scanf("%d", &UserID);
+	}
+	else {
+		UTIL_hexStrToArray(cCommandArg [0], (BYTE *)&UserID, 1);
+	}
+
+	 if (UserID >= MAX_USERS)
+        {
+                LogScreen("\nThere are only 8 users (user0 ... user7) please specify the index of the user to be used for authention!\n");
+                scanf("%d", &UserID);
+        }
+
+	if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; }
+
+	if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+
+	LogScreen("User %d: session opened successfully\n", UserID);
+	FlagSessionActive = UserID;		//set the flag for active session
+	return 0;
+}
+
+int Command_Close(int iScanned) {
+        LogScreen("Destroy all session keys\n");
+        LogScreen("------------------------------------\n");
+
+        if (iScanned > 0)
+                LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+        for (i = 0; i < MAX_USERS; i++)
+                if (V2X_Close(i) == 0) return BREAK_REP;
+
+        memset(SessionActive, 0, sizeof(SessionActive));
+        memset(SessionID, 0, sizeof(SessionID));
+
+        LogScreen("All sessions closed successfully\n");
+        FlagSessionActive = 0;          //reset the flag for active session
+	return 0;
+}
+
+void Command_TestSPI(int iScanned) {
+        LogScreen("Running SPI communication stability test 100K times ... (Press ESC to stop)\n");
+        LogScreen("----------------------------------------------------------------------------\n");
+
+        if (iScanned > 0)
+                LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+        UserID = 0; // No secure session
+        V2X_FirmwareVersion = V2X_firmware_version(0, strng);
+        Save_LogLevel = LogLevel;
+        LogLevel = 1;
+        TestEcho(1, 0);
+        LogLevel = Save_LogLevel;
+
+        LogScreen("SPI test passed successfully\n");
+}
+
+int Command_Info(int iScanned) {
+        LogScreen("V2X Prototype information:\n");
+        LogScreen("------------------------------------\n");
+
+        if (iScanned > 0)
+                LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+        if ((V2X_FirmwareVersion = V2X_firmware_version(UserID, strng)) == 0) { errorflag = 1; return BREAK_REP; }
+        LogScreen("Firmware version: %s\n\n", strng);
+
+        if (i = V2X_get_lifecycle_state(UserID))
+                LogScreen("Life cycle state: %02X - %s\n\n", i, (i == 1) ? "Manufacturing" :
+                ((i == 4) ? "Initialization" :
+                        ((i = 0x10) ? "Operation" : "ERROR")));
+        eSize = V2X_GetMemoryInfo(UserID);
+        LogScreen("Total Private key slots in HSM : %d\n\n", eSize);
+
+        if (!V2X_GetChipInfo(UserID, ChipID)) { errorflag = 1; return BREAK_REP; }
+        HexDump("V2X Prototype serial number: ", ChipID, 12);
+
+        BYTE GetDataAPDU[] = { 0x80, 0xCA, 0x00, 0xFE, 0x10 };
+        if (!V2X_send_apdu(UserID, GetDataAPDU, sizeof(GetDataAPDU), RESP_APDU, &RESP_APDU_size, 100))
+                return BREAK_REP;
+        HexDump("OS CRC:            ", RESP_APDU, 4);
+
+        if (!V2X_GetKeyID(UserID, 0, UserKeyID[0])) return BREAK_REP;
+        HexDump("Transport key ID:  ", UserKeyID[0], KEYIDSIZE);
+
+        if (!V2X_GetKeyID(UserID, 1, UserKeyID[1])) return BREAK_REP;
+        HexDump("Admin key ID:      ", UserKeyID[1], KEYIDSIZE);
+
+        for (i = 2; i<8; i++) {
+                if (!V2X_GetKeyID(UserID, i, UserKeyID[i])) return BREAK_REP;
+                LogScreen("User %d key ID:     ", i);
+                HexDump("", UserKeyID[i], KEYIDSIZE);
+        }
+        if (!V2X_GetKeyID(UserID, 0xC3, FwUpdateKeyID)) return BREAK_REP;
+        HexDump("V2X Prototype Firmware update encryption key ID:  ", FwUpdateKeyID, KEYIDSIZE);
+        if (!V2X_GetKeyID(UserID, 0xC6, FwCApublicKeyID)) return BREAK_REP;
+        HexDump("V2X Prototype Firmware signing CA public key ID:  ", FwCApublicKeyID, KEYIDSIZE);
+
+        if(FlagSessionActive == 0)              //check whitch session is active
+                LogScreen("NO active session!\n");
+        else
+                LogScreen("There is an active session, it belongs to User: %d \n", FlagSessionActive);
+
+        LogScreen("Information retrieved successfully\n");
+        return 0;
+}
+
+int Command_Genkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Generate ECC key pair:\n");
+	LogScreen("------------------------------------\n");
+
+	if (iScanned > 2)
+		LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the key to be generated and the algorithm to be used!\n");
+
+	// First argument (optional): KeyIndex
+	if (strlen(cCommandArg[0]) != 0) {
+		KeyIndex = atoi((const char*)&(cCommandArg[0]));
+	}
+	else {
+		KeyIndex = 0;
+	}
+	// Second argument (optional): AlgID
+	if (strlen(cCommandArg[1]) != 0) {
+
+		if (sscanf((const char*)&(cCommandArg[1]), "%2hhx", &AlgID ) != 1) {
+			LogScreen("Error in AlgID format, expected single byte hex value!\n");
+			return CONTINUE_REP;
+		}
+		if (!CheckAlgID(AlgID)) {
+			LogScreen("Error in AlgID value, please check your input!\n");
+			return CONTINUE_REP;
+		}
+	}
+	else
+		AlgID = 0;
+
+	if (V2X_keygen(UserID, AlgID, KeyIndex, &ECRecipientPublicKey)) {
+		HexDump("Public key: ", ECRecipientPublicKey.blob, ECRecipientPublicKey.len);
+		LogScreen("Key %04d (AlgID 0x%02X) created successfully\n", KeyIndex, AlgID);
+	}
+	return 0;
+}
+
+void Command_Delkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Erase key slot:\n");
+	LogScreen("------------------------------------\n");
+
+	if (iScanned > 1)
+		LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: the index of the key to be erased!\n");
+
+	// First argument (optional): kIndex
+	if (strlen(cCommandArg[0]) != 0) {
+		kIndex = atoi((const char*)&(cCommandArg[0]));
+	}
+	else {
+		kIndex = 0;
+	}
+
+	if (V2X_DeletePrivateKey(UserID, kIndex)) {
+		LogScreen("%d: erased\n", kIndex);
+		LogScreen("Key %d erased successfully\n", kIndex);
+	}
+}
+
+int Command_Reset(int iScanned) {
+	LogScreen("Zeroize V2X Prototype keys, return to Manufacturing state\n");
+	LogScreen("---------------------------------------------------------\n");
+
+	if (iScanned > 0)
+		LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+	UserID = 1; // Authenticate Admin - no other choice
+	if (!GetUserKey(UserID)) { errorflag = 1; return RETURN_0_REP; }
+
+	if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+	if (V2X_DeletePrivateKey(UserID, 0xFFFF))
+		LogScreen("V2X Prototype zeroized\n");
+	return 0;
+}
+
+int Command_Printnvm(int iScanned) {
+	LogScreen("Dump the contet of all key slots (puplic keys) ... (Press ESC to stop)\n");
+        LogScreen(" Slot          Public key\n");
+        LogScreen("---------------------------------------------------------------------\n");
+
+        if (iScanned > 0)
+                LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+        Save_LogLevel = LogLevel; Save_LogLevelFile = LogLevelFile;
+        LogLevel = 0; LogLevelFile = 0;
+
+        for (kIndex = 1; kIndex <= ECC_MAX_KEY_SLOT; kIndex++)
+        {
+                char str[20] = { 0x00 };
+                V2X_export_private_key(UserID, kIndex, &ECPrivKeyChip);
+                if (!V2X_export_public_key(UserID, kIndex, &ECEphemeralPublicKey)) { errorflag = 1; return BREAK_REP; }
+
+                LogLevel = Save_LogLevel; LogLevelFile = Save_LogLevelFile;
+                if (ECPrivKeyChip.len > 2) {
+                        sprintf(str, "%4d: Private  ", kIndex);
+                        HexDump(str, ECPrivKeyChip.blob, ECPrivKeyChip.len);
+                }
+                if (ECEphemeralPublicKey.len > 2) {
+                        sprintf(str, "%4d: Public   ", kIndex);
+                        HexDump(str, ECEphemeralPublicKey.blob, ECEphemeralPublicKey.len);
+                }
+                LogLevel = 0; LogLevelFile = 0;
+
+                if (checkKey() == ESC_KEY)      // Stop cycle if ESC key pressed
+                {
+                        LogLevel = Save_LogLevel; LogLevelFile = Save_LogLevelFile;
+                        LogScreen("ESC pressed  -  Printnvm stopped\n");
+                        return CONTINUE_REP;
+                }
+        }
+        LogLevel = Save_LogLevel; LogLevelFile = Save_LogLevelFile;
+        return 0;
+}
+
+int Command_Prepecdsa(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE], char cCommandBuffer[256]) {
+        if (iScanned > 1)
+                LogScreen("\nIllegal arguments detected - will be ignored! \n Supported: \'l\' (for fast signature speed test) or the number of slots to be prepared!\n");
+        eSize = 5; // default value to be prepared
+        if (strlen(cCommandArg[0]) > 0)
+        {
+                if (cCommandArg[0][0] == 'l')
+                {
+                        LogScreen("Fast signature test ... (Press ESC to stop)\n");
+                        LogScreen("------------------------------------------------------------\n");
+
+                        Save_LogLevel = LogLevel;
+                        LogLevel = 1;
+
+                        if (!Test_FastECDSA_Step1(AlgID, 50)) return BREAK_REP;
+                        if (!Test_FastECDSA_Step2(AlgID)) return BREAK_REP;
+
+                        LogScreen("Speed test:\n");
+                        Test_Time = 0;
+                        Test_Time_Min = 1000;
+                        Test_Time_Max = 0;
+                        for (trans_num = 0, errors_num = 0; trans_num < 100; trans_num++)
+                        {
+                                if (!V2X_ecdsa_fast_sign(UserID, AlgID,
+                                        KeyIndex,
+                                        DigestData,
+                                        DIGEST_SIZE,
+                                        Signature,
+                                        &SignatureSize)) errors_num++;
+                                else if (VerifySignature(BYTE_TestVectorPubKeyECC256_Chip, sizeof(BYTE_TestVectorPubKeyECC256_Chip),
+                                        MessageData, MessageSize,
+                                        Signature, SignatureSize)) errors_num++;
+
+                                LogScreen("Test:%5d  Errors:%4d  Time:%5d ms\n", trans_num + 1, errors_num, (unsigned int)(Stat_Time_finish - Stat_Time_start));
+
+                                Test_Time += (uint64_t)(Stat_Time_finish - Stat_Time_start);
+                                if (Stat_Time_finish - Stat_Time_start > Test_Time_Max) Test_Time_Max = (uint64_t)(Stat_Time_finish - Stat_Time_start);
+                                if (Stat_Time_finish - Stat_Time_start < Test_Time_Min) Test_Time_Min = (uint64_t)(Stat_Time_finish - Stat_Time_start);
+
+                                if (checkKey() == ESC_KEY) return BREAK_REP;  // Stop cycle if ESC key pressed
+                        }
+                        LogScreen("\n=========================================================\n");
+                        LogScreen("Errors:%4d  Min.time:%5d ms  Max.time:%5d ms  Average:%5d ms\r",
+                                errors_num, (unsigned int)Test_Time_Min, (unsigned int)Test_Time_Max, (unsigned int)((Test_Time_Max + Test_Time_Min) / 2));
+
+                        if (errors_num) errorflag = 1;
+
+                        LogLevel = Save_LogLevel;
+                        return CONTINUE_REP;
+                }
+                else
+                        eSize = atoi(&(cCommandBuffer[10]));
+        }
+        else {
+                LogScreen("Enter number of slots to prepare: ");
+                scanf("%d", &eSize);
+        }
+
+        Test_FastECDSA_Step1(AlgID, eSize);
+        return 0;
+}
+
+int Command_TestAES() {
+	LogScreen("AES test - encrypt and decrypt\n");
+	LogScreen("------------------------------------------------------------\n");
+
+	UserID = 1; // Authenticate Admin
+        if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; }
+        if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+
+        for (TestSize = 1; TestSize <= MAX_DATA_SIZE - 16; TestSize++)
+        {
+                for (i = 0; i < TestSize; i++)
+                        TestData[i] = (BYTE)((i >> 8) + (i & 0xFF));   // Prepare data for writing
+
+                if (!V2X_AES_encrypt(UserID, SoftwareEncryptionKeyIndex, TestData, TestSize, EncrData, &EncrDataSize))
+                {
+                        errorflag = 1; LogError("Encryption failed !!!\n"); return BREAK_REP;
+                }
+
+                else if (!V2X_AES_decrypt(UserID, SoftwareEncryptionKeyIndex, EncrData, EncrDataSize, PlainData, &PlainDataSize))
+                {
+                        errorflag = 1; LogError("Decryption failed !!!\n"); return BREAK_REP;
+                }
+
+                else if (memcmp(TestData, PlainData, TestSize) != 0)
+                {
+                        errorflag = 1; LogError("Decrypted data incorrect !!!\n"); return BREAK_REP;
+                }
+
+                if (checkKey() == ESC_KEY)      // Stop cycle if ESC key pressed
+                {
+                        printf("ESC pressed  -  AES Test stopped \n");
+                        return CONTINUE_REP;
+                }
+                LogScreen("Data size:%5d  Time:%5d ms\r", TestSize, (unsigned int)(Stat_Time_finish - Stat_Time_start));
+        }
+        LogScreen("\n");
+        return 0;
+}
+
+int Command_Randkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+        LogScreen("Create random encrypted key file using V2X Prototype random generator\n");
+        LogScreen("------------------------------------------------------------\n");
+
+        // Get file encryption password (command line or type in on keyboard)
+        if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) return BREAK_REP;
+
+        memset(UserKey, 0, sizeof(UserKey));     // Clear keys array
+        memset(UserKeySize, 0, sizeof(UserKeySize)); // Clear key size array
+        memset(UserKeyID, 0, sizeof(UserKeyID));   // Clear keyID array
+
+        if (iScanned == 0) { // No -kx arguments - generate one random key and save it to file
+                if (!V2X_GetRandom(UserID, USER_KEY_SIZE, UserKey[0])) return CONTINUE_REP;
+                HexDump("Generated key: ", UserKey[0], USER_KEY_SIZE);
+                if (!Save_Key(UserKey[0], USER_KEY_SIZE, UserKeyID[0])) return CONTINUE_REP;
+        }
+        else { // Scan -kx arguments - generate random keys for each argument and save them to files, create init.txt script
+                int cnt = 0;
+                for (; cnt < iScanned; cnt++) {
+                        if (cCommandArg[cnt][0] != '-' || cCommandArg[cnt][1] != 'k' || cCommandArg[cnt][2]  < '0' || cCommandArg[cnt][2]  > '7') {
+                                LogError("ERROR: Wrong command line parameter %d, should be -k{0..7}\n", cnt);
+                                return CONTINUE_REP;
+                        }
+                        int keynum = cCommandArg[cnt][2] & 0x0F;
+                        UserKeySize[keynum] = USER_KEY_SIZE; // fix Key size - AES256
+                }
+                char tempstr[2000] = { 0x00 };
+                sprintf(tempstr, "init -psw %s", UtilPassword);
+
+                for (cnt = 0; cnt < MAX_USERS; cnt++) {
+                        if (UserKeySize[cnt]) {
+                                LogScreen("Generating random User %d key\n", cnt); //  generate and save to file the random key for each -kx option
+                                if (!V2X_GetRandom(UserID, USER_KEY_SIZE, (BYTE*)UserKey[cnt])) return CONTINUE_REP;
+                                HexDump("    ", UserKey[cnt], UserKeySize[cnt]);
+                                if (!Save_Key(UserKey[cnt], UserKeySize[cnt], UserKeyID[cnt])) return CONTINUE_REP;
+                                sprintf(tempstr + strlen(tempstr), " -k%d %02X%02X%02X%02X.key", cnt, UserKeyID[cnt][0], UserKeyID[cnt][1], UserKeyID[cnt][2], UserKeyID[cnt][3]);
+                        }
+                }
+                char cmdline[MAX_PATH + 1] = { "./init.txt" };
+                if (!SaveToFile(cmdline, tempstr, strlen(tempstr) + 1))
+                        LogError("\nERROR: Command line file '%s' writing error\n\n", cmdline);
+        }
+        return 0;
+}
+
+int Command_Pwkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Create encrypted key file using entered symbolic password\n");
+	LogScreen("---------------------------------------------------------\n");
+
+	// Get file encryption password (command line or type in on keyboard)
+	if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) return BREAK_REP;
+
+	char EnteredKey[128] = { 0x00 };
+	if (iScanned == 1 && strlen(cCommandArg[0]) <= 2*USER_KEY_SIZE) strcpy(EnteredKey, cCommandArg[0]);
+	else if (!Ask_Password("Please enter symbolic password (8-32 characters) to be stored in key file: ", EnteredKey)) return CONTINUE_REP;
+
+	Save_Key((BYTE*)EnteredKey, strlen(EnteredKey), UserKeyID[0]);
+	return 0;
+}
+
+int Command_Hexkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Create encrypted key file using entered HEX key\n");
+	LogScreen("--------------------------------------------------------\n");
+
+	// Get file encryption password (command line or type in on keyboard)
+	if (!Ask_Password(PASSWORD_PROMPT, UtilPassword)) return BREAK_REP;
+
+	char HexKey[1025] = { 0x00 };
+	if (iScanned == 1 && strlen(cCommandArg[0]) <= sizeof(HexKey) - 1)
+		strcpy(HexKey, cCommandArg[0]);
+	else {
+		LogScreen("Please enter HEX key value (32 bytes) to be stored in key file: ");
+		scanf("%1024s", HexKey);
+	}
+	BYTE BinaryKey[512] = { 0x00 };
+	int BinaryKeySize = UTIL_hexStrToArray(HexKey, BinaryKey, sizeof(BinaryKey));
+	if (BinaryKeySize < 8) { LogError("ERROR: Too short, HEX value: %d bytes\n", BinaryKeySize); return CONTINUE_REP; }
+	if (BinaryKeySize > 32) { LogError("ERROR: Too long, HEX value: %d bytes\n", BinaryKeySize); return CONTINUE_REP; }
+
+	Save_Key(BinaryKey, BinaryKeySize, UserKeyID[0]);
+	return 0;
+}
+
+int Command_Sendcmd(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	LogScreen("Send APDU command and receive response\n");
+	LogScreen("----------------------------------------\n");
+
+	char cCommandFrame[2 * MAX_APDU_SIZE] = { 0x00 };
+	if (iScanned >= 1) {
+		strcpy(cCommandFrame, cCommandArg[0]);
+		if (iScanned > 1)
+			LogScreen("\nIllegal arguments detected - will be ignored! \n");
+	}
+	else {
+		LogScreen("Please enter APDU command: ");
+		scanf("%3600s", cCommandFrame);
+	}
+
+	BYTE ucBinaryFrame[MAX_APDU_SIZE] = { 0x00 };
+	int BinaryFrameSize = UTIL_hexStrToArray(cCommandFrame, ucBinaryFrame, sizeof(ucBinaryFrame));
+	if ((BinaryFrameSize < 4) || (BinaryFrameSize > MAX_APDU_SIZE)) { LogError("ERROR: wrong command size\n");  return CONTINUE_REP; }
+
+	int iRet = 0;
+	Save_LogLevel = LogLevel;
+	LogLevel = 3;
+
+	memset(RESP_APDU, '\x00', sizeof(RESP_APDU));
+	RESP_APDU_size = 0;
+	// ???
+	do
+	{
+		iRet = SPI_protocol_send(ucBinaryFrame, BinaryFrameSize, RESP_APDU, &RESP_APDU_size, MAX_APDU_TRIES, 1000);
+		if (checkKey() == ESC_KEY) return CONTINUE_REP;  // Stop cycle if ESC key pressed
+	} while (iRet != 1);
+
+	LogLevel = Save_LogLevel;
+	//LogScreen("\n=========================================================\n");
+	return 0;
+}
+
+int Command_Sendcmd2(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+        LogScreen("Send APDU command but use secure channel\n");
+	LogScreen("----------------------------------------\n");
+
+	int ret = 0;
+
+        if (iScanned > 1)                                                       // check number of arguments
+                LogScreen("\nIllegal arguments detected - will be ignored! \n");
+
+        // get APDU Command:
+        char cCommandFrame[2 * MAX_APDU_SIZE] = { 0x00 };
+        if (strlen(cCommandArg[0]) == 0) {
+                LogScreen("Please enter APDU command: ");
+		scanf("%3600s", cCommandFrame);
+        }
+        else {
+                strcpy(cCommandFrame, cCommandArg[0]);
+        }
+
+        // get User ID:
+	char cUserApduByte[2 * MAX_APDU_SIZE] = { 0x00 };
+	strncpy(cUserApduByte, cCommandFrame, 1);
+	cUserApduByte[1] = '\0';
+	UserID = atoi(cUserApduByte);
+
+        LogScreen("Command: %s \n", cCommandFrame);
+        LogScreen("User: 0%d \n", UserID);
+
+	// open secure session if required:
+	if (UserID >= 0 && UserID < 8) {
+		if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; } //Connect to V2X Prototype: ask file encryption password, load and authenticate User key
+
+		if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+	}
+
+	Save_LogLevel = LogLevel;
+	LogLevel = 3;			// print SPI information
+
+	// Send APDU Command:
+	ret = SendAPDU(cCommandFrame, 200); // "SendAPDU" uses "V2X_send_apdu"
+	if (ret)
+		LogScreen("APDU sent successfully");
+
+	LogLevel = Save_LogLevel;
+
+	// close session:
+	for (i = 0; i< MAX_USERS; i++)
+		if (V2X_Close(i) == 0) return BREAK_REP;
+
+	memset(SessionActive, 0, sizeof(SessionActive));
+	memset(SessionID, 0, sizeof(SessionID));
+
+        return 0;
+}
+
+int Command_Setac(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+        LogScreen("Change / Set Access Condition Byte\n");
+        LogScreen("------------------------------------------------------------\n");
+
+        //get:
+        //mode:   0x00 - get files access conditions array
+        //        0x01 - get keys access conditions array
+        //        0x02 - get V2X Prototype life cycle access conditions array
+        //set:
+        //      fileID (0, 0xE000 ... 0xE009)
+        //      keyID (0xF000...0xF007)
+        //      Lifecycle AC (0xFFFF)
+
+        if (iScanned != 3 ) {
+                LogScreen("Please use the correct format (3 values required): type of AC [userX, fileX or lifecycle], byte to change [byteX], value where x ... [0 ... 7]");
+                return CONTINUE_REP;
+        }
+
+        BYTE ucMode = 0;
+        BYTE ucIndex = 0;
+        BYTE ucByteNumber = 0x00;
+        BYTE ucValue = 0x00;
+
+        if (strcmp(cCommandArg[0], "lifecycle") == 0) {
+                ucMode = 0x02;
+        }
+        else if (strncmp(cCommandArg[0], "user", 4) == 0)
+        {
+                ucMode = 0x01;
+                if (sscanf(cCommandArg[0], "user%hhx", &ucIndex) != 1)
+                        return CONTINUE_REP;
+
+                // allowed range: 1 ... 8 AC_Keys[MAX_USERS], MAX_USERS 8
+                if ((ucIndex < 1) || (ucIndex > 8)) {
+                        LogScreen("Illegal value of parameter userX; allowed: userX, whereas X is in the range [1 ... 8] \n");
+                        return CONTINUE_REP;
+                }
+                // decrement for 0 based index
+                ucIndex--;
+        }
+        else if (strncmp(cCommandArg[0], "file", 4) == 0)
+        {
+                ucMode = 0x00;
+                if (sscanf(cCommandArg[0], "file%hhx", &ucIndex) != 1)
+                        return CONTINUE_REP;
+
+                // allowed range: 1 ... 11 [AC_Files[1+MAX_NVM_FILES], MAX_NVM_FILES 10
+                if ((ucIndex < 1) || (ucIndex > 11)) {
+                        LogScreen("Illegal value of prameter fileX; allowed: fileX, whereas X is in the range [1 ... 11] \n");
+                        return CONTINUE_REP;
+                }
+                // decrement for 0 based index
+                ucIndex--;
+        }
+	else {
+                LogScreen("Illegal value of prameter 1; allowed: userX, fileX or lifecycle \n");
+                return CONTINUE_REP;
+        }
+
+        if (sscanf(cCommandArg[1], "byte%hhx", &ucByteNumber) != 1) {
+                LogScreen("Illegal value of prameter 2; allowed: byteX \n");
+                return CONTINUE_REP;
+        }
+
+        if (sscanf(cCommandArg[2], "%hhx", &ucValue) != 1) {
+                LogScreen("Illegal value of prameter 3; allowed: single byte \n");
+                return CONTINUE_REP;
+        }
+
+        LogScreen("Authenticate user 0 and start secure session\n");
+        UserID = 0;
+        // Authenticate
+        if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; }
+        if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+        BYTE ucACs[128] = { 0x00 };
+        V2X_get_access_conditions(UserID, ucMode, ucACs );
+        ucACs[ucByteNumber + (ucIndex * AC_SIZE)] = ucValue;
+        LogScreen("Change V2X keys AC - User 0 auth required\n");
+
+        unsigned short sIndex = 0x0000;
+        switch (ucMode)
+        {
+        case 0x02:
+                // Lifecycle
+                sIndex = NVM_OFFSET_LIFECYCLE;
+                break;
+        case 0x01:
+                // User
+                sIndex = (NVM_OFFSET_PASSWORDS + ucIndex);
+                break;
+        case 0x00:
+                // File
+                sIndex = (NVM_OFFSET_FILES + ucIndex);
+                break;
+        default:
+                errorflag = 1; break;
+        };
+
+	if (V2X_change_access_conditions(UserID, sIndex, &(ucACs[(ucIndex * AC_SIZE)]), AC_SIZE) == 0) return BREAK_REP;
+        V2X_Close(UserID); // Close Admin session with HSM
+        return 0;
+}
+
+int Command_Writefile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	if (iScanned != 2) {
+		LogScreen("Please use the correct format (2 values required): file index, data to be written \n");
+		return CONTINUE_REP;
+	}
+
+	int FileID = 0;
+	if (strlen(cCommandArg[0]) != 0)
+		FileID = atoi((const char*)&(cCommandArg[0]));
+
+	BYTE ucData[MAX_DATA_SIZE] = { 0x00 };
+	int iDataLen;
+	if((strcmp(cCommandArg[1], "0") == 0) || (strcmp(cCommandArg[1], "NULL") == 0))
+	{
+		// nothing to do
+		iDataLen = sizeof(ucData);
+		LogScreen("Erase File \n");
+	}
+	else
+	{
+		iDataLen = UTIL_hexStrToArray(cCommandArg[1], ucData, sizeof(ucData));
+		if (iDataLen == 0) {
+			LogScreen("Illegal value of prameter 2; max allowed: 1800 byte \n");
+			return CONTINUE_REP;
+		}
+		LogScreen("Write Data to File \n");
+	}
+	LogScreen("------------------------------------------------------------\n");
+
+	UserID = 1;
+	if (!GetUserKey(UserID)) { errorflag = 1; return RETURN_0_REP; }
+
+	if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) return BREAK_REP;
+
+	if (!V2X_write_file(UserID, FileID, ucData, iDataLen)) return BREAK_REP;
+
+	return 0;
+}
+
+int Command_Readfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	if (iScanned != 1) {
+		LogScreen("Please use the correct format (1 value required): file index\n");
+		return CONTINUE_REP;
+	}
+	LogScreen("Read file content\n");
+	LogScreen("------------------------------------------------------------\n");
+
+	int FileID = 0;
+	if (strlen(cCommandArg[0]) != 0)
+		FileID = atoi((const char*)&(cCommandArg[0]));
+
+	UserID = 1;
+	if (!GetUserKey(UserID)) { errorflag = 1; return RETURN_0_REP; }
+
+	if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) return BREAK_REP;
+
+	BYTE ucData[MAX_DATA_SIZE] = { 0x00 };
+	int iDataLen = sizeof(ucData);
+	if (!V2X_read_file(UserID, FileID, ucData, &iDataLen)) return BREAK_REP;
+
+	HexDump("File content: ", ucData, iDataLen);
+	LogScreen("\n============================================================\n");
+	return 0;
+}
+
+int Command_Importkey(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+	if ((iScanned < 2) || (iScanned > 3)) {
+		LogScreen("Please use the correct format (2 values required, 3rd value optional): key index, key data to be imported and optional algorithm id \n");
+		return CONTINUE_REP;
+	}
+
+	LogScreen("Import Private Key\n");
+	LogScreen("------------------------------------------------------------\n");
+
+	// First argument (mandatory): KeyIndex
+	if (strlen(cCommandArg[0]) != 0)
+		KeyIndex = atoi((const char*)&(cCommandArg[0]));
+	else
+		KeyIndex = 0;
+
+	BYTE BYTE_PrivKeyImport[ECC_PRIV_KEY_SIZE];
+	int iPrivKeyLen = UTIL_hexStrToArray(cCommandArg[1], BYTE_PrivKeyImport, sizeof(BYTE_PrivKeyImport));
+	if (iPrivKeyLen == 0) {
+		LogScreen("Illegal value of prameter 2; max allowed: 32 byte \n");
+		return CONTINUE_REP;
+	}
+	// Third argument (optional): AlgID
+	if (strlen(cCommandArg[2]) != 0) {
+		if (sscanf((const char*)&(cCommandArg[2]), "%2hhx", &AlgID ) != 1) {
+			LogScreen("Error in AlgID format, expected single byte hex value!\n");
+			return CONTINUE_REP;
+		}
+		if (!CheckAlgID(AlgID)) {
+			LogScreen("Error in AlgID value, please check your input!\n");
+			return CONTINUE_REP;
+		}
+    	}
+	else
+		AlgID = 0;
+
+	UserID = 1;
+	if (!GetUserKey(UserID)) { errorflag = 1; return RETURN_0_REP; }
+
+	if (V2X_Open(UserID, UserKey[UserID], strlen(UserKey[UserID])) == 0) return BREAK_REP;
+
+	ECPrivateKey ECPrivKeyImport = { ECC_PRIV_KEY_SIZE, BYTE_PrivKeyImport };
+
+	if (V2X_import_private_key(UserID, AlgID, KeyIndex, &ECPrivKeyImport) == 0)
+		Log("\nError importing private key!\n");
+
+	// reconstruct public key
+	if (!V2X_ecqv_reception(UserID, AlgID,
+		KeyIndex,
+		KeyIndex,
+		NULL, 0,
+		NULL, 0,
+		NULL, 0,
+		&ECPublicKeyChip)) {
+		errorflag = 1; return RETURN_0_REP;
+	}
+
+	if (V2X_import_public_key(UserID, AlgID, KeyIndex, &ECPublicKeyChip) == 0)
+		Log("\nError importing public key!\n");
+
+	LogScreen("Key %04d (AlgID: 0x%02X) imported successfully\n", KeyIndex, AlgID);
+	return 0;
+}
+
+void Command_UpdateFW(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
+        if (iScanned != 1) {
+                LogScreen("Please use the correct format (1 value required): firmware file (*.bin)\n");
+        }
+        else {
+                LogScreen("Update firmware ...\n");
+                LogScreen("------------------------------------------------------------\n");
+
+                if (Program_HSM_Firmware(cCommandArg[0]) == 0) {
+                        Log("\nError updating firmware!\n");
+                }
+        }
 }

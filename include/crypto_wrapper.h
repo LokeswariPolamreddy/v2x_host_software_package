@@ -51,7 +51,7 @@
 #define CRYPT_MODE_OFB          3       // Output feedback mode
 #define CRYPT_MODE_CFB          4       // Cipher feedback mode
 #define CRYPT_MODE_CTS          5       // Ciphertext stealing mode
-#define MAX_CURVES 4
+#define MAX_CURVES 7
 
 #define ECIES_CIPHER EVP_aes_128_ccm() // EVP_aes_128_cbc()
 #define ECIES_HASH EVP_sha256()
@@ -160,6 +160,27 @@ int Crypto_ECDSA_Verify(BYTE *pubKey,
                          int     digestlen,
                          BYTE   *signature,
                          int     signlen);
+
+int Crypto_SM2_Verify(BYTE *pubKey,
+                         int      publen,
+                         BYTE   *digest,
+                         int     digestlen,
+                         BYTE   *signature,
+                         int     signlen);
+
+int Crypto_SM2_Decrypt  (BYTE *pri_key,
+                         BYTE    *c1,
+                         BYTE    *c3,
+                         BYTE    *c2,
+                         int      c2_len,
+			 BYTE	 *plaintext);
+
+int Crypto_SM2_Encrypt  (BYTE *pub_key,
+                         BYTE    *c1,
+                         BYTE    *c2,
+                         BYTE    *c3,
+                         int      message_len,
+			 BYTE	 *message);
 
 int Crypto_ECQV_HashToInteger(
                        uint8_t   *certU, // In: The digest of CertU mod n
