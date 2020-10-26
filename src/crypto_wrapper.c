@@ -96,6 +96,9 @@ static int SetAlgCrypto (ALG_ID algID,
 //-------------------------------------- AES: 32 bytes key ------------------------------------------
     else if (algID == ALG_AES_256  && encMode == CRYPT_MODE_ECB) cipher = EVP_aes_256_ecb();
     else if (algID == ALG_AES_256  && encMode == CRYPT_MODE_CBC) cipher = EVP_aes_256_cbc();
+//-------------------------------------- SM4: 16 bytes key ------------------------------------------
+    else if (algID == ALG_SM4  && encMode == CRYPT_MODE_ECB) cipher = EVP_sm4_ecb();
+    else if (algID == ALG_SM4  && encMode == CRYPT_MODE_CBC) cipher = EVP_sm4_cbc();
     else {
         LogError("Invalid algorithm ID (%08X) or Enc. Mode (%08X)!\n", algID, encMode);
         return 0;
@@ -422,6 +425,28 @@ int Crypto_Hash(BYTE *msg,
     else if (hashlen == SHA384_DIGEST_LENGTH)  return SHA384(msg, mlen, hash) ? 1 : 0;
     else if (hashlen == SHA512_DIGEST_LENGTH)  return SHA512(msg, mlen, hash) ? 1 : 0;
     return 0;
+}
+
+//--------------------------------------------------------------------
+// SM3 digest calculation
+// Returns: 1 - success, 0 = error
+//--------------------------------------------------------------------
+int Crypto_Hash_SM3(BYTE *msg,
+             	int   mlen,
+             	BYTE *hash,
+             	int   hashlen)
+{
+	EVP_MD_CTX *md_ctx = NULL;
+	const EVP_MD *md;	
+	md_ctx = EVP_MD_CTX_new();
+	if (md_ctx == NULL)
+		return 0;
+	md = EVP_sm3();
+	EVP_DigestInit_ex (md_ctx, md, NULL);
+	EVP_DigestUpdate  (md_ctx, msg, mlen);
+    EVP_DigestFinal_ex(md_ctx, hash, NULL);
+
+	return 1;
 }
 
 //--------------------------------------------------------------------

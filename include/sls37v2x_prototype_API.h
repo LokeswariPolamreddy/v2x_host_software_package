@@ -484,5 +484,21 @@ extern int V2X_FirmwareVersion;
 				uint8_t *C3);			// In: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
 
 
+	V2X_RESULT V2X_SM4_encrypt(
+                    		int userid,     		// In: Admin/User ID
+                    		uint32_t index,	    		// In: Encr. key index in V2X Prototype NVM (0 - 7)
+                    		uint8_t const  *plaindata,  	// In: The plain data
+                    		size_t plainLen,		// In: The length of the plain data
+                    		uint8_t  *encrdata,		// Out: Returns the encrypted data encoded as a byte array
+                    		size_t    *encrLen);		// Out: Returns the number of bytes in encrypted data
+
+
+	V2X_RESULT V2X_SM4_decrypt(
+                    		int userid,			// In: Admin/User ID
+                    		uint32_t index,			// In: Encr. key index in V2X Prototype NVM (0 .. 7 or 0xF000 .. 0xF007)
+                    		uint8_t const  *encrdata,	// In: encrypted data encoded as a byte array
+                    		size_t encrLen,			// In: the number of bytes in encrypted data
+                    		uint8_t *plaindata,		// Out: The plain data
+                    		size_t  *plainLen);		// Out: the pointer to the length of the plain data
 #endif
 

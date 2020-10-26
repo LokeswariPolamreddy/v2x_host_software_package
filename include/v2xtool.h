@@ -34,7 +34,7 @@
 /*******************************
 *    Defines/Macros            *
 *******************************/
-#define VERSION "1.3"
+#define VERSION "1.4"
 #define NVM_PAGE_SIZE 256
 #define NVM_UPLOAD_BLOCK_SIZE 1536
 #define ESC_KEY 27
@@ -159,6 +159,7 @@ int Command_Printnvm(int iScanned);
 
 int Command_Prepecdsa(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE], char CCommandBuffer[256]);
 int Command_TestAES();
+int Command_TestSM4();
 int Command_Randkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);
 // Command_Init();
 int Command_Pwkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]);

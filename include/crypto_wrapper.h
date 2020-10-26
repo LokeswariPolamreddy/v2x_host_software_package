@@ -42,7 +42,6 @@
 
 
 
-
 /*******************************
 *    Defines/Macros            *
 *******************************/
@@ -65,7 +64,7 @@ typedef unsigned int ALG_ID;
 typedef enum _ALG {
 	ALG_DES, ALG_3DES_112, ALG_3DES,
 	ALG_MAC, ALG_HMAC,
-	ALG_AES, ALG_AES_128, ALG_AES_192, ALG_AES_256,
+	ALG_SM4, ALG_AES_128, ALG_AES_192, ALG_AES_256,
 	ALG_RSA_SIGN, ALG_DSS_SIGN,
 	ALG_SHA1, ALG_SHA_256, ALG_SHA_384, ALG_SHA_512
 } ALG;
@@ -132,14 +131,19 @@ int Crypto_init(BYTE algid);
 void Crypto_close();
 
 int Crypto_KeyGen(	BYTE *bPubKey,
-					int  *iPubKeyLen,
-					BYTE *bPrvKey,
-					int  *iPrvKeyLen);
+			int  *iPubKeyLen,
+			BYTE *bPrvKey,
+			int  *iPrvKeyLen);
 
 int Crypto_Hash( BYTE *msg,
-				 int   mlen,
-				 BYTE *hash,
-				 int   hashlen);
+		 int   mlen,
+		 BYTE *hash,
+		 int   hashlen);
+
+int Crypto_Hash_SM3(BYTE *msg,
+             	 int   mlen,
+             	 BYTE *hash,
+             	 int   hashlen);
 
 int Crypto_ECDH( BYTE  hashalg,  //
                  BYTE *pubkey,   // Remote party ECC public key in DER format

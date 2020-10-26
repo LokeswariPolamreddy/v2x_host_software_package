@@ -198,8 +198,8 @@ BYTE ConvertAlgID(BYTE alg)
         case ECIES_NISTP384                 : return 2;
         case ECDSA_BRAINPOOLP384_WITH_SHA256: return 3;
         case ECIES_BRAINPOOLP384            : return 3;
-	case SM2_DS			    : return 6;
-	case SM2_PKE			    : return 6;
+	    case SM2_DS			                : return 6;
+	    case SM2_PKE			            : return 6;
     }
 	return 0;
 }
@@ -215,8 +215,8 @@ BOOL CheckAlgID(BYTE alg)
         case ECIES_NISTP384                 :
         case ECDSA_BRAINPOOLP384_WITH_SHA256:
         case ECIES_BRAINPOOLP384            :
-	case SM2_DS			    :
-	case SM2_PKE			    :
+	    case SM2_DS			                :
+	    case SM2_PKE			            :
  		 return 1;
 	default:
 		return 0;
@@ -1213,7 +1213,7 @@ V2X_RESULT V2X_digest(
     }
 
     BUILD_APDU_START(0x50)
-    APDUbuffer[2] = 0x00;
+    APDUbuffer[2] = algID;
     APDUbuffer[3] = 0x00;
     ShortOrExtendedLength(message, messageLen);
 
@@ -2246,3 +2246,117 @@ V2X_RESULT V2X_sm2_decrypt	   (int userID, 	    	// In: Admin/User ID
     return ret;
 }
 
+//-----------------------------------------------------------------------------
+// V2X_SM4_encrypt - encrypt data using SM4 algorithm and key stored on V2X Prototype
+//                   Key index provided in P1P2.
+//                   Returns encrypted data.
+//
+// Send APDU: CLA=80, INS=E4, P1P2=KeyID, Lc=Var Data=Plain data
+// Response:          Encrypted data
+//-----------------------------------------------------------------------------
+V2X_RESULT V2X_SM4_encrypt(
+                    int                 userid,     // In: Admin/User ID
+                    uint32_t            index,	    // In: Encr. key index in V2X Prototype NVM (0 - 7)
+                    uint8_t     const  *plaindata,  // In: The plain data
+                    size_t              plainLen,	// In: The length of the plain data
+                    uint8_t            *encrdata,	// Out: Returns the encrypted data encoded as a byte array
+                    size_t             *encrLen)	// Out: Returns the number of bytes in encrypted data
+{
+    int ret;
+    int kid = (int)index;
+    if (kid >= NVM_OFFSET_PASSWORDS) kid -= NVM_OFFSET_PASSWORDS;
+    if (kid >= MAX_NVM_FILES) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_encrypt: Incorrect key ID: %X\n", index);
+#endif
+        errorflag=1;
+        return 0;
+    }
+    if (encrLen) *encrLen = 0;
+
+    if ((int)plainLen > MAX_DATA_SIZE) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_encrypt: Plain.data too big: %d bytes\n", plainLen);
+#endif
+        errorflag=1;
+        return 0;
+    }
+
+    BUILD_APDU_CLA(0x89, 0xE4) // 0x89: AES128, 0x8A: AES256
+    BUILD_APDU_INDEX(kid)
+    ShortOrExtendedLength((BYTE*)plaindata, plainLen);
+
+    ret = V2X_send_apdu(userid, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 100);
+
+    if (!CheckResponse(ret, "V2X_SM4_encrypt", index)) ret = 0;
+    else if (RESP_APDU_size <= 0) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_encrypt: Encrypted data size incorrect: len=%d\n", RESP_APDU_size);
+#endif
+        errorflag=1;
+        ret = 0;
+    }
+    else {
+        if (encrdata) memcpy(encrdata, RESP_APDU, RESP_APDU_size);
+        if (encrLen) *encrLen = RESP_APDU_size;
+    }
+
+    return ret;
+}
+//-----------------------------------------------------------------------------
+// V2X_SM4_decrypt - decrypt data using SM4 algorithm and key stored on V2X Prototype
+//                   Key index provided in P1P2.
+//                   Returns decrypted data.
+//
+// Send APDU: CLA=80, INS=E5, P1P2=KeyID, Lc=Var Data=encrypted data
+// Response:          Plain data
+//-----------------------------------------------------------------------------
+V2X_RESULT V2X_SM4_decrypt(
+                    int                 userid,		// In: Admin/User ID
+                    uint32_t            index,		// In: Encr. key index in V2X Prototype NVM (0 .. 7 or 0xF000 .. 0xF007)
+                    uint8_t     const  *encrdata,	// In: encrypted data encoded as a byte array
+                    size_t              encrLen,	// In: the number of bytes in encrypted data
+                    uint8_t            *plaindata,	// Out: The plain data
+                    size_t             *plainLen)	// Out: the pointer to the length of the plain data
+{
+    int ret;
+    int kid = (int)index;
+    if (kid >= NVM_OFFSET_PASSWORDS) kid -= NVM_OFFSET_PASSWORDS;
+    if (kid >= MAX_NVM_FILES) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_decrypt: Incorrect key ID: %X\n", index);
+#endif
+        errorflag=1;
+        return 0;
+    }
+    if (plainLen) *plainLen = 0;
+
+    if ((int)encrLen > MAX_DATA_SIZE) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_decrypt: Encr.data too big: %d bytes\n", encrLen);
+#endif
+        errorflag=1;
+        return 0;
+    }
+
+    BUILD_APDU_CLA(0x89, 0xE5)
+    BUILD_APDU_INDEX(kid)
+    ShortOrExtendedLength(encrdata, encrLen);
+
+    ret = V2X_send_apdu(userid, APDUbuffer, APDUsize, RESP_APDU, &RESP_APDU_size, 100);
+
+    if (!CheckResponse(ret, "V2X_SM4_decrypt", index)) ret = 0;
+    else if (RESP_APDU_size <= 0) {
+#ifdef DEBUG
+        LogError("ERROR: V2X_SM4_decrypt: Decrypted data size incorrect: len=%d\n", RESP_APDU_size);
+#endif
+        errorflag=1;
+        ret = 0;
+    }
+    else {
+        if (plaindata) memcpy(plaindata, RESP_APDU, RESP_APDU_size);
+        if (plainLen) *plainLen = RESP_APDU_size;
+    }
+
+    return ret;
+}

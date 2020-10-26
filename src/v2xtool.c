@@ -31,6 +31,8 @@
 #include "testvectors_hmac.c" // HMAC variables and test vectors
 #include "testvectors_kdf.c" // KDF2 variables and test vectors
 #include "testvectors_sm2.c" // SM2 variables and test vectors
+#include "testvectors_sm3.c" // SM3 test vectors
+#include "testvectors_sm4.c" // SM4 test vectors
 
 /*******************************
 *    Variable Definitions      *
@@ -387,26 +389,26 @@ int Test_SM2()
     LogScreen("SM2 standard sign:\n");
     LogScreen("------------------------------------\n");
 
-    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;
+    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;  
 
     MessageSize = UTIL_hexStrToArray(TestVector_SHA_Message[0], MessageData, sizeof(MessageData));
     Crypto_Hash(MessageData, MessageSize, DigestData, DIGEST_SIZE); // Calculate SHA256 locally - does not matter
 
-    if (!V2X_sm2_sign(	UserID,
+    if (!V2X_sm2_sign(	UserID, 
 			SM2_DS,
                         KeyIndex,
                         DigestData,
                         DIGEST_SIZE,
                         Signature,
-                        &SignatureSize))
+                        &SignatureSize)) 
     { errorflag = 1; return 0; }
 
     HexDumpPort("SM2 Signature: ", Signature, SignatureSize);
-    LogScreen("Test:SM2 SignData: Time:%5d ms\n", (unsigned int)(Stat_Time_finish - Stat_Time_start));
+//    LogScreen("Test:SM2 SignData: Time:%5d ms\n", (unsigned int)(Stat_Time_finish - Stat_Time_start));
 
     if (VerifySM2Signature(/*BYTE_TestVectorPubKeySM2256_Chip, sizeof(BYTE_TestVectorPubKeySM2256_Chip)*/ ECRecipientPublicKey.blob, ECRecipientPublicKey.len, MessageData, MessageSize, &(Signature[1]), 0x40))
         { errorflag = 1;  LogError("SM2 Signature verification on the host failed !\n\n"); }
-    else
+    else 
 	LogScreen("SM2 Signature verified on host - OK\n\n");
 
     LogScreen("SM2 standard encrypt:\n");
@@ -428,7 +430,7 @@ int Test_SM2()
 				C2, 			// Out: Part 2 of the ciphertext (ciphered message). Size <plainLen>
 				C3))			// Out: Part 3 of the ciphertext (authentication tag/digest). Fixed to 32B
    { errorflag = 1; return 0; }
-
+   
    LogScreen("Encrypting message on chip - OK\n");
    HexDumpPort("C1 (X): ", C1 + 1, 0x20);
    HexDumpPort("C1 (Y): ", C1 + 1 + 0x20, 0x20);
@@ -441,11 +443,11 @@ int Test_SM2()
                          C3,
                          C2,
                          0x10,
-			 plaintext))
+			 plaintext)) 
     { errorflag = 1; return 0; }
 
     // check if host decryption confirms the calculation
-    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {
+    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {   
     	LogScreen("SM2 Encrypting on chip and verifying message on host - OK\n\n");
     }
     else {
@@ -458,10 +460,10 @@ int Test_SM2()
     LogScreen("SM2 standard decrypt:\n");
     LogScreen("------------------------------------\n");
 
-    // erase result
+    // erase result	
     memset(plaintext, '\x00', sizeof(plaintext));
 
-    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;
+    if (!V2X_keygen(UserID, SM2_DS, KeyIndex, &ECRecipientPublicKey)) return 0;  
 
     // Encrypt on host side
     if (!Crypto_SM2_Encrypt  (ECRecipientPublicKey.blob,
@@ -478,8 +480,8 @@ int Test_SM2()
     HexDumpPort("C1 (Y): ", C1 + 1 + 0x20, 0x20);
     HexDumpPort("C2: ", C2, 0x10);
     HexDumpPort("C3: ", C3, 0x20);
-
-    // Decrypt on chip
+    
+    // Decrypt on chip 
     if (!V2X_sm2_decrypt(	UserID, 	// In: Admin/User ID
 			        SM2_DS,		// In: Algorithm/curve: SM2_PKE
 				KeyIndex, 	// In: Recipient private key
@@ -491,7 +493,7 @@ int Test_SM2()
     { errorflag = 1; return 0; }
 
     // check if host decryption confirms the calculation
-    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {
+    if (memcmp(plaintext, ucSM2_Msg, 0x10) == 0) {   
     	LogScreen("SM2 Encrypting on host and decrypting message on chip - OK\n");
     }
     else {
@@ -500,8 +502,33 @@ int Test_SM2()
 	errorflag = 1;
 	return 0;
     }
+}
 
+//-------------------------------------------------------------------------------
+int Test_SM3()
+{
+    LogScreen("SM3 digest:\n");
+    LogScreen("------------------------------------\n");
+    for (i=0; i<sizeof(TestVector_SM3_Message) / sizeof(char*); i++)
+    {
+        // Load test vector data
+        MessageSize = UTIL_hexStrToArray(TestVector_SM3_Message[i], MessageData, sizeof(MessageData));
 
+        // Get digest from V2X Prototype; 0x05: SM3 algorithm
+        if (!V2X_digest(UserID, 0x05, MessageData, MessageSize, DigestData, &DigestSize))
+            { errorflag = 1; return 0; }
+
+        HexDumpPort("Message: ", MessageData, MessageSize);
+        HexDumpPort("SM3:  ", DigestData, DigestSize);
+
+        // Compare digest with test vectors
+        if (!CheckTestVector("SM3 test vector", DigestData, DigestSize, TestVector_SM3_Out[i])) return 0;
+
+        // Verify OpenSSL - Calculate SM3 locally and compare with test vectors
+        Crypto_Hash_SM3(MessageData, MessageSize, TestData, DigestSize);
+        if (!CheckTestVector("SM3 OpenSSL", TestData, DigestSize, TestVector_SM3_Out[i])) return 0;
+    }
+    return 1;
 }
 
 //-------------------------------------------------------------------------------
@@ -1117,7 +1144,7 @@ int Program_HSM_Firmware(char *binfilename)
 	SessionActive[0] = 0;
 	{
 		BYTE ReactivateSPIFlashLoaderAPDU[] = { 0xC2, 0xA0, 0x01, 0x00, 0x10 };
-		if (!V2X_send_apdu(UserID, ReactivateSPIFlashLoaderAPDU, sizeof(ReactivateSPIFlashLoaderAPDU), RESP_APDU, &RESP_APDU_size, 1000))
+		if (!V2X_send_apdu(UserID, ReactivateSPIFlashLoaderAPDU, sizeof(ReactivateSPIFlashLoaderAPDU), RESP_APDU, &RESP_APDU_size, 100))
 		{
 			errorflag = 1;
 			return 0;
@@ -1432,9 +1459,18 @@ fileinput:
 			Test_FastECDSA_Step2(AlgID);
 			Test_ECDSA_standard(AlgID);
 		}
-		else if (strncmp(cCommandBuffer, "testsm2", 9) == 0) {								// testsm2
+		else if (strncmp(cCommandBuffer, "testsm2", 7) == 0) {								// testsm2
 			Test_SM2();
 		}
+		else if (strncmp(cCommandBuffer, "testsm3", 7) == 0) {								// testsm2
+			Test_SM3();
+		}
+		else if (strncmp(cCommandBuffer, "testsm4", 7) == 0) {	
+                        int ret = 0;							// testsm2
+			ret = Command_TestSM4();
+			if (ret == CONTINUE_REP) { continue; }
+			if (ret == BREAK_REP) { break; }                        
+		}                                
 		else if (strncmp(cCommandBuffer, "testecdh", 8) == 0) {								// testecdh
 			Test_ECDH(AlgID);
 		}
@@ -1517,11 +1553,12 @@ fileinput:
 			ret = Command_Sendcmd(iScanned, cCommandArg);
 			if (ret == CONTINUE_REP) { continue; }
 		}
-                else if (strcmp(cCommand, "sendcmd2") == 0) {                                                                   // sendcmd2
-                        int ret = 0;
-                        ret = Command_Sendcmd2(iScanned, cCommandArg);
-			if (ret == BREAK_REP) { break; }
-                }
+        else if (strcmp(cCommand, "sendcmd2") == 0) {                                  // sendcmd2
+            int ret = 0;
+            ret = Command_Sendcmd2(iScanned, cCommandArg);
+            if (ret == CONTINUE_REP) { continue; }
+            if (ret == BREAK_REP) { break; }
+        }
 		else if (strcmp(cCommand, "setac") == 0) {									// setac
 			int ret = 0;
                         ret = Command_Setac(iScanned, cCommandArg);
@@ -1608,7 +1645,7 @@ void Command_Help() {
         LogScreen("info        ... show version string, life cycle state, access conditions, secure session information, etc.\n");
         LogScreen("printnvm    ... dump content of key slots (public keys) and file slots\n");
         LogScreen("writefile   ... write data (raw bytes) into a specified file slot; specify 0 or NULL for zeroizing a file\n");
-        LogScreen("readfile    ... reads a file slots\n");
+        LogScreen("readfile    ... reads a file slot\n");
         LogScreen("importkey   ... import ECC public/private key pair into key slot (parameter: slot id, private key)\n");
         LogScreen("genkey      ... generate a ECC key pair and store it in one key slot [0 ... 2999]\n");
         LogScreen("delkey      ... delete one or all key slots\n");
@@ -1616,8 +1653,8 @@ void Command_Help() {
         LogScreen("randkeyfile ... Generate encrypted key file using the chip's TRNG\n");
         LogScreen("pwkeyfile   ... Generate encrypted key file with a symbolic password\n");
         LogScreen("hexkeyfile  ... Generate encrypted key file with a hex string\n");
-        LogScreen("sendcmd     ... send APDU command (\"e.g. 80CA000000\") and receive response.\n");
-	LogScreen("sendcmd2    ... send APDU command (\"e.g. 30CA000000\") but use a secure channel.\n");
+        LogScreen("sendcmd     ... send APDU command (e.g.\"80CA000000\") and receive response.\n");
+        LogScreen("sendcmd2    ... send APDU command (e.g.\"30CA000000\") but use a secure channel.\n");
         LogScreen("reset       ... \"Factory Reset\": delete all key slots, file slots, return to MANUFACTURING state, return to default access conditions (if permitted)\n");
         LogScreen("testsha     ... run SHA256 test vectors (+print timing)\n");
         LogScreen("testhmac    ... run HMAC test vectors (+print timing)\n");
@@ -1628,6 +1665,8 @@ void Command_Help() {
         LogScreen("testecies   ... run ECIES test vectors (+print timing)\n");
         LogScreen("testaes     ... run AES test vectors (+print timing)\n");
         LogScreen("testsm2     ... run SM2 algorithm test (+print timing)\n");
+        LogScreen("testsm3     ... run SM3 algorithm test (+print timing)\n");
+        LogScreen("testsm4     ... run SM4 algorithm test (+print timing)\n");
         LogScreen("testx       ... test all v2x commands\n");
         LogScreen("q or quit   ... exit the program\n");
 }
@@ -1961,6 +2000,88 @@ int Command_TestAES() {
         return 0;
 }
 
+int Command_TestSM4() {
+	LogScreen("SM4 test - encrypt and decrypt\n");
+	LogScreen("------------------------------------------------------------\n");
+
+	UserID = 1; // Authenticate Admin
+        if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; }
+        if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+
+//         // SM4 Test Vector
+//         BYTE ucTestKey [16]  = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10};        
+//         BYTE ucTest [16]     = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10};
+//         V2X_SM4_encrypt(UserID, SoftwareEncryptionKeyIndex, ucTest, 16, EncrData, &EncrDataSize);
+//         V2X_SM4_decrypt(UserID, SoftwareEncryptionKeyIndex, EncrData, 16, ucTest, &EncrDataSize);
+
+//         //Verify against test vector & verify against OPENSSL
+//         //Load test vector data
+//         MessageSize = UTIL_hexStrToArray(TestVector_SM4_PlainText[i], MessageData, 16);
+//         HexDumpPort("SM4 Test vector: ", MessageData, 16);
+
+//         // Get encrypted data from V2X Prototype
+//         if (! V2X_SM4_encrypt(UserID, SoftwareEncryptionKeyIndex, MessageData, MessageSize, EncrData, &EncrDataSize))
+//             { errorflag = 1; return 0; }
+
+//         HexDumpPort("Message: ", MessageData, MessageSize);
+//         HexDumpPort("SM4 result:  ", EncrData, EncrDataSize);
+//         i = 0;
+
+//         // Compare encrypted data with test vector
+//         if (!CheckTestVector("SM4 test vector", EncrData, EncrDataSize, TestVector_SM4_CipherText[i])) return 0;
+
+//         // Verify OpenSSL - Calculate SHA256 locally and compare with test vectors
+//         Crypto_Encrypt(ucTestKey, 16, ALG_SM4, SESSION_ENC_MODE, MessageData, MessageSize, TestData, & DigestSize);
+//         if (!CheckTestVector("SM4 OpenSSL", TestData, DigestSize, TestVector_SM4_CipherText[i])) return 0;
+
+        for (TestSize = 1; TestSize <= MAX_DATA_SIZE - 16; TestSize++)
+        {
+                for (i = 0; i < TestSize; i++)
+                        TestData[i] = (BYTE)((i >> 8) + (i & 0xFF));   // Prepare data for writing
+
+                if (!V2X_SM4_encrypt(UserID, SoftwareEncryptionKeyIndex, TestData, TestSize, EncrData, &EncrDataSize))
+                {
+                        errorflag = 1; LogError("Encryption failed !!!\n"); return BREAK_REP;
+                }
+                // Do a OpenSSL verification of the encryption for correct block sizes
+                if ((TestSize > 0) && ((TestSize % 16) == 0)) {
+                        GetUserKey(7);
+                        Crypto_Encrypt(UserKey[7], 16, ALG_SM4, SESSION_ENC_MODE, TestData, TestSize, MessageData, & MessageSize);
+                        // HexDumpPort("Key: ", UserKey[7], 16);
+                        // HexDumpPort("Data: ", TestData, TestSize);
+                        // HexDumpPort("OpenSSL SM4 result: ", MessageData, 16);
+                        // HexDumpPort("V2X Result: ", EncrData, EncrDataSize);
+                        //if (!CheckTestVectorBinary("SM4 OpenSSL", EncrData, 16, MessageData, 16)) return 0;
+                        if (memcmp(EncrData, MessageData, 16) != 0) {
+                                LogError("ERROR: %s is incorrect:\n", "SM4 OpenSSL Verification");
+                                HexDump("           ", EncrData, EncrDataSize);
+                                HexDump("Should be: ", MessageData, MessageSize);
+                                return 0;
+                        }
+                }    
+                if (!V2X_SM4_decrypt(UserID, SoftwareEncryptionKeyIndex, EncrData, EncrDataSize, PlainData, &PlainDataSize))
+                {
+                        errorflag = 1; LogError("Decryption failed !!!\n"); return BREAK_REP;
+                }
+
+                if (memcmp(TestData, PlainData, TestSize) != 0)
+                {
+                        errorflag = 1; LogError("Decrypted data incorrect !!!\n"); return BREAK_REP;
+                }            
+
+                if (checkKey() == ESC_KEY)      // Stop cycle if ESC key pressed
+                {
+                        printf("ESC pressed  -  SM4 Test stopped \n");
+                        return CONTINUE_REP;
+                }
+                LogScreen("Data size:%5d  Time:%5d ms\r", TestSize, (unsigned int)(Stat_Time_finish - Stat_Time_start));
+                
+        }
+        LogScreen("\n");
+        return 0;
+}
+
+
 int Command_Randkeyfile(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
         LogScreen("Create random encrypted key file using V2X Prototype random generator\n");
         LogScreen("------------------------------------------------------------\n");
@@ -2083,9 +2204,9 @@ int Command_Sendcmd(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
 
 int Command_Sendcmd2(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
         LogScreen("Send APDU command but use secure channel\n");
-	LogScreen("----------------------------------------\n");
+    LogScreen("----------------------------------------\n");
 
-	int ret = 0;
+    int ret = 0;
 
         if (iScanned > 1)                                                       // check number of arguments
                 LogScreen("\nIllegal arguments detected - will be ignored! \n");
@@ -2094,44 +2215,44 @@ int Command_Sendcmd2(int iScanned, char cCommandArg[20][2*MAX_APDU_SIZE]) {
         char cCommandFrame[2 * MAX_APDU_SIZE] = { 0x00 };
         if (strlen(cCommandArg[0]) == 0) {
                 LogScreen("Please enter APDU command: ");
-		scanf("%3600s", cCommandFrame);
+        scanf("%3600s", cCommandFrame);
         }
         else {
                 strcpy(cCommandFrame, cCommandArg[0]);
         }
 
         // get User ID:
-	char cUserApduByte[2 * MAX_APDU_SIZE] = { 0x00 };
-	strncpy(cUserApduByte, cCommandFrame, 1);
-	cUserApduByte[1] = '\0';
-	UserID = atoi(cUserApduByte);
+    char cUserApduByte[2 * MAX_APDU_SIZE] = { 0x00 };
+    strncpy(cUserApduByte, cCommandFrame, 1);
+    cUserApduByte[1] = '\0';
+    UserID = atoi(cUserApduByte);
 
         LogScreen("Command: %s \n", cCommandFrame);
         LogScreen("User: 0%d \n", UserID);
 
-	// open secure session if required:
-	if (UserID >= 0 && UserID < 8) {
-		if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; } //Connect to V2X Prototype: ask file encryption password, load and authenticate User key
+    // open secure session if required:
+    if (UserID >= 0 && UserID < 8) {
+        if (!GetUserKey(UserID)) { errorflag = 1; return BREAK_REP; } //Connect to V2X Prototype: ask file encryption password, load and authenticate User key
 
-		if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
-	}
+        if (V2X_Open(UserID, UserKey[UserID], UserKeySize[UserID]) == 0) return BREAK_REP;
+    }
 
-	Save_LogLevel = LogLevel;
-	LogLevel = 3;			// print SPI information
+    Save_LogLevel = LogLevel;
+    LogLevel = 3;           // print SPI information
 
-	// Send APDU Command:
-	ret = SendAPDU(cCommandFrame, 200); // "SendAPDU" uses "V2X_send_apdu"
-	if (ret)
-		LogScreen("APDU sent successfully");
+    // Send APDU Command:
+    ret = SendAPDU(cCommandFrame, 200); // "SendAPDU" uses "V2X_send_apdu"
+    if (ret)
+        LogScreen("APDU sent successfully");
 
-	LogLevel = Save_LogLevel;
+    LogLevel = Save_LogLevel;
 
-	// close session:
-	for (i = 0; i< MAX_USERS; i++)
-		if (V2X_Close(i) == 0) return BREAK_REP;
+    // close session:
+    for (i = 0; i< MAX_USERS; i++)
+        if (V2X_Close(i) == 0) return BREAK_REP;
 
-	memset(SessionActive, 0, sizeof(SessionActive));
-	memset(SessionID, 0, sizeof(SessionID));
+    memset(SessionActive, 0, sizeof(SessionActive));
+    memset(SessionID, 0, sizeof(SessionID));
 
         return 0;
 }
